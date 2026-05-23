@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.cursor/
+.claude/
+.idea/
+.opencode/
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+
+# elemental is a reference repo, not part of this project
+elemental/
+/logs
+
+# Local process documents live outside the code repository.
+/openspec/
