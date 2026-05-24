@@ -9,7 +9,7 @@ Covers:
     incoming metadata and invokes the inner handler
 
 End-to-end trace propagation (quant-handler → strategy-service →
-account-service) is verified separately by ``scripts/verify_tracing.sh``.
+core-service) is verified separately by ``scripts/verify_tracing.sh``.
 """
 
 from __future__ import annotations

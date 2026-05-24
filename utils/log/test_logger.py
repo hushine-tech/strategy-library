@@ -151,12 +151,12 @@ class TestAllLogTypes(unittest.TestCase):
     def test_grpc_ext_log(self):
         self.logger.grpc_ext_log(None, GRPCExtLog(
             method="/account.v1.AccountService/GetAccount",
-            target_service="account-service:50051",
+            target_service="core-service:50051",
             latency_ms=12, status_code=0, error="",
         ))
         e = self._entry(Type.GRPC_EXT)
         self.assertEqual(e["type"], "grpc_ext")
-        self.assertEqual(e["target_service"], "account-service:50051")
+        self.assertEqual(e["target_service"], "core-service:50051")
 
     def test_kafka_sent_log(self):
         self.logger.kafka_sent_log(None, KafkaSentLog(
