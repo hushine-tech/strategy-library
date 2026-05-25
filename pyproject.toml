@@ -37,6 +37,7 @@ test = [
 where = ["."]
 include = [
   "algo*",
+  "hushine_strategy*",
   "market_data*",
   "strategy_service*",
   "utils*"
