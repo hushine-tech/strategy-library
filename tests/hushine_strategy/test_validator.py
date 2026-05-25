@@ -33,6 +33,26 @@ def test_rejects_network_import_from():
     assert result.issues[0].module == "requests"
 
 
+def test_allows_future_annotations_import():
+    result = validate_strategy_code("from __future__ import annotations\nclass MyStrategy:\n    INPUTS=[]\n")
+    assert result.ok is True
+    assert result.issues == []
+
+
+def test_rejects_third_party_dotted_import():
+    result = validate_strategy_code("import pandas.io.common as common\nclass MyStrategy:\n    INPUTS=[]\n")
+    assert result.ok is False
+    assert result.issues[0].code == "forbidden_import"
+    assert result.issues[0].module == "pandas.io.common"
+
+
+def test_rejects_third_party_dotted_import_from():
+    result = validate_strategy_code("from pandas.io import common\nclass MyStrategy:\n    INPUTS=[]\n")
+    assert result.ok is False
+    assert result.issues[0].code == "forbidden_import"
+    assert result.issues[0].module == "pandas.io"
+
+
 def test_rejects_relative_import():
     result = validate_strategy_code("from .hushine_strategy import OrderDecision\nclass MyStrategy:\n    INPUTS=[]\n")
     assert result.ok is False

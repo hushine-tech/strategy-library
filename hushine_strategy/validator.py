@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 
 ALLOWED_IMPORT_ROOTS = {
+    "__future__",
     "bisect",
     "collections",
     "dataclasses",
@@ -216,7 +217,11 @@ def validate_strategy_code(code: str) -> ValidationResult:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = _root(alias.name)
-                if root in FORBIDDEN_IMPORT_ROOTS or root not in ALLOWED_IMPORT_ROOTS:
+                if (
+                    root in FORBIDDEN_IMPORT_ROOTS
+                    or root not in ALLOWED_IMPORT_ROOTS
+                    or ("." in alias.name and root != "hushine_strategy")
+                ):
                     issues.append(ValidationIssue(
                         code="forbidden_import",
                         message=f"import {alias.name} is not allowed in base-futures-v1",
@@ -226,7 +231,12 @@ def validate_strategy_code(code: str) -> ValidationResult:
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
             root = _root(module)
-            if node.level > 0 or root in FORBIDDEN_IMPORT_ROOTS or root not in ALLOWED_IMPORT_ROOTS:
+            if (
+                node.level > 0
+                or root in FORBIDDEN_IMPORT_ROOTS
+                or root not in ALLOWED_IMPORT_ROOTS
+                or ("." in module and root != "hushine_strategy")
+            ):
                 issues.append(ValidationIssue(
                     code="forbidden_import",
                     message=f"from {module} import is not allowed in base-futures-v1",
