@@ -35,3 +35,7 @@ class MarketData:
     low: float | None = None
     close: float | None = None
     volume: float | None = None
+    klines: Any = None
+    orderbook: Any = None
+    oi: float | None = None
+    funding_rate: float | None = None

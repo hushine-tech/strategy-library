@@ -53,6 +53,21 @@ def test_input_view_returns_latest_tick_by_market_symbol_interval():
     assert view.market["futures"].symbol["BTCUSDT"].interval["1m"] == tick
 
 
+def test_market_data_keeps_platform_kline_compatibility_fields():
+    tick = MarketData(
+        symbol="BTCUSDT",
+        price=100.0,
+        timestamp=123,
+        market="futures",
+        interval="1m",
+        klines={"close": 100.0},
+    )
+    assert tick.klines == {"close": 100.0}
+    assert tick.orderbook is None
+    assert tick.oi is None
+    assert tick.funding_rate is None
+
+
 def test_input_view_ignores_undeclared_ticks():
     view = InputView([StrategyInput(market="futures", symbol="BTCUSDT", interval="1m")])
     tick = MarketData(symbol="ETHUSDT", price=100.0, timestamp=123, market="futures", interval="1m")
