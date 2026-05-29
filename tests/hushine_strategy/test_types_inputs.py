@@ -18,6 +18,12 @@ def test_order_decision_defaults_market_to_none():
     assert decision.market is None
 
 
+def test_order_decision_preserves_legacy_positional_market_argument():
+    decision = OrderDecision("BTCUSDT", "LONG", 0.01, None, "futures")
+    assert decision.market == "futures"
+    assert decision.exchange is None
+
+
 def test_parse_declared_inputs_normalizes_values():
     inputs = parse_declared_inputs([
         {"market": "Futures", "symbol": "btcusdt", "interval": "1m"},
