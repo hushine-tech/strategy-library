@@ -10,7 +10,9 @@ class OrderDecision:
     side: str
     qty: float
     price: float | None = None
+    exchange: str | None = None
     market: str | None = None
+    position_side: str | None = None
 
 
 @dataclass(frozen=True)
