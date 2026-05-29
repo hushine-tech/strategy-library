@@ -11,7 +11,7 @@ from __future__ import annotations
 from hushine_strategy import OrderDecision
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def __init__(self):
         self.done = False
@@ -27,7 +27,7 @@ class MyStrategy:
 
 UNDECLARED_TICK_STRATEGY_CODE = """
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def on_market_data(self, data, wallet):
         1 / 0
@@ -38,7 +38,7 @@ SMUGGLED_IMPORT_STRATEGY_CODE = """
 from pandas.io.common import os
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def on_market_data(self, data, wallet):
         self.leaked = os.name
@@ -50,7 +50,7 @@ SMUGGLED_DOTTED_MODULE_STRATEGY_CODE = """
 import pandas.io.common as common
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def on_market_data(self, data, wallet):
         1 / 0
@@ -63,7 +63,7 @@ SMUGGLED_FROMLIST_MODULE_STRATEGY_CODE = """
 from pandas.io import common
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def on_market_data(self, data, wallet):
         1 / 0
@@ -77,7 +77,7 @@ import numpy as np
 from hushine_strategy import OrderDecision
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def on_market_data(self, data, wallet):
         qty = float(np.array([0.01])[0])
@@ -92,7 +92,7 @@ from pandas import DataFrame
 from hushine_strategy import OrderDecision
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def on_market_data(self, data, wallet):
         frame = DataFrame(pd.Series(np.array([0.01])), columns=["qty"])
@@ -104,7 +104,7 @@ SMUGGLED_ROOT_MODULE_ATTRIBUTE_STRATEGY_CODE = """
 import pandas as pd
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def on_market_data(self, data, wallet):
         self.leaked = pd.io.common.os.listdir(".")
@@ -116,7 +116,7 @@ SMUGGLED_NUMPY_BUILTINS_STRATEGY_CODE = """
 import numpy as np
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def on_market_data(self, data, wallet):
         self.leaked = np.__builtins__["__import__"]("os")
@@ -128,7 +128,7 @@ SMUGGLED_HUSHINE_FORBIDDEN_EXPORT_STRATEGY_CODE = """
 from hushine_strategy.notifier import Path
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def on_market_data(self, data, wallet):
         self.leaked = Path(".").exists()

@@ -6,7 +6,7 @@ from hushine_strategy import OrderDecision
 import numpy as np
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
 
     def on_market_data(self, data, wallet):
         return None
