@@ -30,6 +30,7 @@ class MarketData:
     symbol: str
     price: float
     timestamp: Any
+    exchange: str = "binance"
     market: str = "futures"
     interval: str = "1m"
     open: float | None = None
