@@ -13,6 +13,8 @@ class OrderDecision:
     market: str | None = None
     exchange: str | None = None
     position_side: str | None = None
+    order_type: str | None = None
+    time_in_force: str | None = None
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,38 @@ class OrderFill:
     price: float
     fee: float = 0.0
     status: str = "FILLED"
+
+
+@dataclass(frozen=True)
+class OrderUpdateFill:
+    symbol: str
+    qty: float
+    fill_price: float
+    fee: float = 0.0
+    fee_asset: str = ""
+    fee_missing: bool = False
+    exchange_trade_id: str = ""
+    exchange_order_id: str = ""
+
+
+@dataclass(frozen=True)
+class OrderUpdateEvent:
+    event_id: int
+    session_id: str
+    account_id: int
+    venue_id: int
+    exchange: str
+    market: str
+    side: str
+    position_side: str
+    event_type: str
+    order_status: str
+    intent_id: str = ""
+    attempt_id: str = ""
+    order_id: str = ""
+    exchange_order_id: str = ""
+    exchange_trade_id: str = ""
+    fill: OrderUpdateFill | None = None
 
 
 @dataclass(frozen=True)
