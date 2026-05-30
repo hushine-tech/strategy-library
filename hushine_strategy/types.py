@@ -4,16 +4,43 @@ from dataclasses import dataclass
 from typing import Any
 
 
+class Exchange:
+    BINANCE = "binance"
+    OKX = "okx"
+
+
+class Market:
+    SPOT = "spot"
+    PERPETUAL_FUTURES = "perpetual_futures"
+    DELIVERY_FUTURES = "delivery_futures"
+
+
+class OrderSide:
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class OrderType:
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+
+class PositionSide:
+    BOTH = "BOTH"
+    LONG = "LONG"
+    SHORT = "SHORT"
+
+
 @dataclass(frozen=True)
 class OrderDecision:
+    exchange: str
+    market: str
     symbol: str
     side: str
-    qty: float
-    price: float | None = None
-    market: str | None = None
-    exchange: str | None = None
+    qty: str
+    order_type: str
+    price: str | None = None
     position_side: str | None = None
-    order_type: str | None = None
     time_in_force: str | None = None
 
 
@@ -68,8 +95,8 @@ class MarketData:
     symbol: str
     price: float
     timestamp: Any
-    exchange: str = "binance"
-    market: str = "futures"
+    exchange: str = Exchange.BINANCE
+    market: str = Market.PERPETUAL_FUTURES
     interval: str = "1m"
     open: float | None = None
     high: float | None = None

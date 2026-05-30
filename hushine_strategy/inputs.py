@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from hushine_strategy.types import MarketData
+from hushine_strategy.types import Exchange, Market, MarketData
 
 
 @dataclass(frozen=True)
@@ -18,22 +18,27 @@ class StrategyInput:
         return (self.exchange, self.market, self.symbol, self.interval)
 
 
+@dataclass(frozen=True)
+class StrategyOrderTarget:
+    exchange: str
+    market: str
+    symbol: str
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return (self.exchange, self.market, self.symbol)
+
+
 def _normalize_exchange(value: Any) -> str:
     exchange = str(value or "").strip().lower()
-    if exchange not in {"binance", "okx"}:
+    if exchange not in {Exchange.BINANCE, Exchange.OKX}:
         raise ValueError(f"unsupported exchange: {exchange or '<empty>'}")
     return exchange
 
 
 def _normalize_market(value: Any) -> str:
     market = str(value or "").strip().lower()
-    aliases = {
-        "futures": "perpetual_futures",
-        "usdm_futures": "perpetual_futures",
-        "perp": "perpetual_futures",
-    }
-    market = aliases.get(market, market)
-    if market not in {"spot", "perpetual_futures", "delivery_futures"}:
+    if market not in {Market.SPOT, Market.PERPETUAL_FUTURES, Market.DELIVERY_FUTURES}:
         raise ValueError(f"unsupported market: {market or '<empty>'}")
     return market
 
@@ -99,7 +104,6 @@ class InputView:
         self._allowed = {_normalize_key(i.exchange, i.market, i.symbol, i.interval) for i in inputs}
         self._values: dict[tuple[str, str, str, str], MarketData] = {}
         self.exchange = _ExchangeNode(self._values)
-        self.market = _MarketNode(self._values)
 
     def update(self, tick: MarketData) -> bool:
         key = _normalize_key(getattr(tick, "exchange", "binance"), tick.market, tick.symbol, tick.interval)
@@ -141,4 +145,34 @@ def parse_declared_inputs(raw: Any) -> list[StrategyInput]:
             interval=interval,
         )
         out.append(normalized)
+    return out
+
+
+def parse_order_targets(raw: Any) -> list[StrategyOrderTarget]:
+    if raw is None:
+        raise ValueError("ORDER_TARGETS must be declared, use [] for read-only strategies")
+    out: list[StrategyOrderTarget] = []
+    for item in list(raw):
+        if isinstance(item, StrategyOrderTarget):
+            exchange, market, symbol = item.exchange, item.market, item.symbol
+        elif isinstance(item, dict):
+            exchange = item.get("exchange")
+            market = item.get("market")
+            symbol = item.get("symbol")
+        else:
+            raise ValueError("each ORDER_TARGETS item must be a dict with exchange, market, and symbol")
+        if exchange is None or market is None or symbol is None:
+            raise ValueError("ORDER_TARGETS exchange, market, and symbol are required")
+        exchange = str(exchange).strip()
+        market = str(market).strip()
+        symbol = str(symbol).strip()
+        if not exchange or not market or not symbol:
+            raise ValueError("ORDER_TARGETS exchange, market, and symbol are required")
+        out.append(
+            StrategyOrderTarget(
+                exchange=_normalize_exchange(exchange),
+                market=_normalize_market(market),
+                symbol=symbol.upper(),
+            )
+        )
     return out

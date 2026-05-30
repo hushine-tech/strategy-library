@@ -37,10 +37,10 @@ class FuturesWallet:
         qty = float(decision.qty)
         if qty <= 0:
             raise ValueError("qty must be positive")
-        if side not in {"LONG", "BUY", "SHORT", "SELL"}:
+        if side not in {"BUY", "SELL"}:
             raise ValueError(f"unsupported side: {decision.side}")
         signed_qty = qty
-        if side in {"SHORT", "SELL"}:
+        if side == "SELL":
             signed_qty = -abs(signed_qty)
         else:
             signed_qty = abs(signed_qty)

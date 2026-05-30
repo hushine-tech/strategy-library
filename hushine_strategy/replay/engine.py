@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from inspect import getmodule
 from typing import Iterable
 
-from hushine_strategy.inputs import InputView, parse_declared_inputs
+from hushine_strategy.inputs import InputView, parse_declared_inputs, parse_order_targets
 from hushine_strategy.notifier import LocalNotifier
-from hushine_strategy.types import MarketData, OrderDecision
+from hushine_strategy.types import Market, MarketData, OrderDecision
 from hushine_strategy.validator import ALLOWED_IMPORT_ROOTS, FORBIDDEN_IMPORT_ROOTS, validate_strategy_code
 from hushine_strategy.wallet.futures import FuturesWallet
 
@@ -153,16 +153,32 @@ def run_replay(config: ReplayConfig) -> ReplayResult:
     strategy = _load_strategy(config.strategy_code, config.strategy_path)
     setattr(strategy, "notify", config.notifier or LocalNotifier())
     inputs = parse_declared_inputs(getattr(strategy, "INPUTS", None))
+    order_targets = parse_order_targets(getattr(strategy, "ORDER_TARGETS", None))
+    for target in order_targets:
+        if target.market != Market.PERPETUAL_FUTURES:
+            raise ValueError(f"local replay only supports perpetual_futures ORDER_TARGETS, got {target.market}")
+    order_target_keys = {target.key for target in order_targets}
     view = InputView(inputs)
     bars = 0
     orders = 0
     for tick in config.ticks:
-        config.wallet.update_mark_price(tick.symbol, tick.price)
         if not view.update(tick):
             continue
+        config.wallet.update_mark_price(tick.symbol, tick.price)
         decision = strategy.on_market_data(view, config.wallet)
         bars += 1
         if isinstance(decision, OrderDecision):
+            if not order_target_keys:
+                raise ValueError("ORDER_TARGETS is empty; strategy cannot return OrderDecision")
+            if str(decision.market).strip().lower() != Market.PERPETUAL_FUTURES:
+                raise ValueError(f"local replay only supports perpetual_futures orders, got {decision.market}")
+            decision_key = (
+                str(decision.exchange).strip().lower(),
+                str(decision.market).strip().lower(),
+                str(decision.symbol).strip().upper(),
+            )
+            if decision_key not in order_target_keys:
+                raise ValueError(f"order target {decision_key} is not declared in ORDER_TARGETS")
             config.wallet.fill_order(decision, float(decision.price or tick.price))
             orders += 1
     return ReplayResult(bars_processed=bars, orders_filled=orders)

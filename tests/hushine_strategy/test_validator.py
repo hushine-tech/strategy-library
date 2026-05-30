@@ -2,11 +2,12 @@ from hushine_strategy.validator import validate_strategy_code
 
 
 VALID_CODE = """
-from hushine_strategy import OrderDecision
+from hushine_strategy import Exchange, Market, OrderDecision
 import numpy as np
 
 class MyStrategy:
-    INPUTS = [{"exchange": "binance", "market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "symbol": "BTCUSDT", "interval": "1m"}]
+    ORDER_TARGETS = []
 
     def on_market_data(self, data, wallet):
         return None
