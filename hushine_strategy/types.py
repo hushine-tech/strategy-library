@@ -57,6 +57,10 @@ class OrderUpdateEvent:
     exchange_order_id: str = ""
     exchange_trade_id: str = ""
     fill: OrderUpdateFill | None = None
+    orig_qty: float = 0.0
+    executed_qty: float = 0.0
+    remaining_qty: float = 0.0
+    avg_price: float = 0.0
 
 
 @dataclass(frozen=True)
