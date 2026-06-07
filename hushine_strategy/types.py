@@ -81,6 +81,8 @@ class OrderUpdateEvent:
     position_side: str
     event_type: str
     order_status: str
+    event_source: str = ""
+    symbol: str = ""
     intent_id: str = ""
     attempt_id: str = ""
     order_id: str = ""
