@@ -81,8 +81,6 @@ class OrderUpdateEvent:
     position_side: str
     event_type: str
     order_status: str
-    event_source: str = ""
-    symbol: str = ""
     intent_id: str = ""
     attempt_id: str = ""
     order_id: str = ""
@@ -93,6 +91,8 @@ class OrderUpdateEvent:
     executed_qty: float = 0.0
     remaining_qty: float = 0.0
     avg_price: float = 0.0
+    event_source: str = ""
+    symbol: str = ""
 
 
 @dataclass(frozen=True)

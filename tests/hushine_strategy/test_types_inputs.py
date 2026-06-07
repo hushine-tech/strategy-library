@@ -12,7 +12,7 @@ from hushine_strategy import (
     parse_declared_inputs,
 )
 from hushine_strategy.inputs import StrategyOrderTarget, parse_order_targets
-from hushine_strategy.types import OrderSide, OrderType, PositionSide
+from hushine_strategy.types import OrderSide, OrderType, OrderUpdateEvent, PositionSide
 
 
 def test_strategy_api_constants_are_public_string_values():
@@ -53,6 +53,39 @@ def test_order_decision_requires_explicit_route_fields():
     assert decision.qty == "0.01"
     assert decision.order_type == "MARKET"
     assert decision.price is None
+
+
+def test_order_update_event_keeps_legacy_positional_fields_stable():
+    event = OrderUpdateEvent(
+        7,
+        "session-1",
+        1,
+        10,
+        "binance",
+        "perpetual_futures",
+        "BUY",
+        "BOTH",
+        "fill",
+        "PARTIALLY_FILLED",
+        "intent-1",
+        "attempt-1",
+        "order-1",
+        "exchange-order-1",
+        "trade-1",
+        None,
+        1.0,
+        0.4,
+        0.6,
+        50000.0,
+    )
+
+    assert event.intent_id == "intent-1"
+    assert event.attempt_id == "attempt-1"
+    assert event.order_id == "order-1"
+    assert event.exchange_order_id == "exchange-order-1"
+    assert event.exchange_trade_id == "trade-1"
+    assert event.event_source == ""
+    assert event.symbol == ""
 
 
 def test_parse_declared_inputs_normalizes_values():
