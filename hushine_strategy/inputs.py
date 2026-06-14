@@ -29,6 +29,11 @@ class StrategyOrderTarget:
         return (self.exchange, self.market, self.symbol)
 
 
+@dataclass(frozen=True)
+class StrategyRiskControls:
+    max_loss_close_pct: float | None = None
+
+
 def _normalize_exchange(value: Any) -> str:
     exchange = str(value or "").strip().lower()
     if exchange not in {Exchange.BINANCE, Exchange.OKX}:
@@ -176,3 +181,20 @@ def parse_order_targets(raw: Any) -> list[StrategyOrderTarget]:
             )
         )
     return out
+
+
+def parse_risk_controls(raw: Any) -> StrategyRiskControls:
+    if raw is None:
+        return StrategyRiskControls()
+    if not isinstance(raw, dict):
+        raise ValueError("RISK_CONTROLS must be a dict")
+    value = raw.get("max_loss_close_pct")
+    if value is None:
+        return StrategyRiskControls()
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("RISK_CONTROLS.max_loss_close_pct must be a number") from exc
+    if not (0.0 < parsed <= 1.0):
+        raise ValueError("RISK_CONTROLS.max_loss_close_pct must satisfy 0 < value <= 1")
+    return StrategyRiskControls(max_loss_close_pct=parsed)

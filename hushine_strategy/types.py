@@ -42,6 +42,9 @@ class OrderDecision:
     price: str | None = None
     position_side: str | None = None
     time_in_force: str | None = None
+    post_only: bool = False
+    good_till_date: Any | None = None
+    reduce_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,8 @@ class OrderUpdateEvent:
     executed_qty: float = 0.0
     remaining_qty: float = 0.0
     avg_price: float = 0.0
+    event_source: str = ""
+    symbol: str = ""
 
 
 @dataclass(frozen=True)
