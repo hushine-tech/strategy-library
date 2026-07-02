@@ -7,7 +7,7 @@ name = "hushine-strategy-library"
 version = "0.1.0"
 description = "Shared strategy, market-data, logging, and middleware utilities for Hushine."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [
   { name = "Hushine Tech" }
