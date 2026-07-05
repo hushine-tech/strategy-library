@@ -49,11 +49,11 @@ from algo import IndicatorBundle
 
 ### wallet（已移出本库）
 
-旧的 `Position / FutureWallet / Account / SpotWallet` 实现已经删除。
+旧的 `Position / FutureWallet / Portfolio / SpotWallet` 实现已经删除。
 
 - 当前唯一有效的钱包 runtime 位于 `strategy-service/strategy_service/wallet/`
 - `strategy-service` 主链路统一通过
-  `strategy_service.wallet_factory.build_wallet_from_account` 构造运行时
+  `strategy_service.wallet_factory.build_wallet_from_portfolio` 构造运行时
 - 本库现在只保留 `market_data`、`algo`、`utils` 这三类通用能力
 
 ---

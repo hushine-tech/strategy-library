@@ -138,19 +138,19 @@ class TestAllLogTypes(unittest.TestCase):
 
     def test_grpc_access_log(self):
         self.logger.grpc_access_log(None, GRPCAccessLog(
-            method="/account.v1.AccountService/GetAccount",
+            method="/portfolio.v1.PortfolioService/GetPortfolio",
             client_ip="127.0.0.1", latency_ms=8,
             status_code=0, error="",
             request_params={"id": "abc"}, response={"balance": 100},
         ))
         e = self._entry(Type.GRPC_ACCESS)
         self.assertEqual(e["type"], "grpc_access")
-        self.assertEqual(e["method"], "/account.v1.AccountService/GetAccount")
+        self.assertEqual(e["method"], "/portfolio.v1.PortfolioService/GetPortfolio")
         self.assertEqual(e["status_code"], 0)
 
     def test_grpc_ext_log(self):
         self.logger.grpc_ext_log(None, GRPCExtLog(
-            method="/account.v1.AccountService/GetAccount",
+            method="/portfolio.v1.PortfolioService/GetPortfolio",
             target_service="core-service:50051",
             latency_ms=12, status_code=0, error="",
         ))

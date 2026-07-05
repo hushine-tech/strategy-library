@@ -73,7 +73,7 @@ class OrderUpdateFill:
 class OrderUpdateEvent:
     event_id: int
     session_id: str
-    account_id: int
+    portfolio_id: int
     venue_id: int
     exchange: str
     market: str
