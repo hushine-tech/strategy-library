@@ -1,19 +1,27 @@
 # Strategy Library
 
-> 更新时间：2026-04-04
+> 更新时间：2026-07-10
 
 ## 概述
 
-Strategy Library 是 Strategy Service 的基础库，不能独立运行。提供市场数据接口、指标算法、日志和中间件封装。
-
-钱包 runtime 已在 `Phase C2b` 后收敛到 `strategy-service` 仓库内维护，
-本库不再保留独立的 wallet 实现或兼容导出。
+Strategy Library 是 Hushine 发布的 Python 策略 SDK 及共享兼容库。它提供策略声明与校验、本地确定性 replay、策略可见的钱包类型、市场数据读取、指标算法，以及 Elemental 兼容的日志与 tracing；它本身不是交易执行服务。
 
 ---
 
-## 模块说明
+## 发布 SDK：`hushine_strategy`
 
-### market_data（市场数据接口）
+- `hushine_strategy.types`：策略声明、`OrderDecision`、枚举和回调使用的数据类型。
+- `hushine_strategy.validator`：平台与本地工具共享的策略声明 / 代码校验。
+- `hushine_strategy.replay`：由 strategy-debugger-cli 使用的确定性本地 replay。
+- `hushine_strategy.wallet`：策略可见的钱包类型和 helper；生产记账 runtime 仍由 strategy-service 维护。
+
+`hushine_strategy` 顶层包会重新导出常用声明与类型，包括 `StrategyInput`、`StrategyOrderTarget`、`OrderDecision`、`OrderSide`、`OrderType` 和 `PositionSide`。
+
+---
+
+## 顶层共享模块
+
+### `market_data`（市场数据模型与读取）
 
 ```python
 from market_data import BacktestDataSource, LiveDataSource
@@ -27,7 +35,7 @@ from market_data import BacktestDataSource, LiveDataSource
 
 ---
 
-### algo（指标算法）
+### `algo`（指标算法与 bundle）
 
 ```python
 from algo.indicators import RSI, MACD, BollingerBands, ATR
@@ -47,30 +55,13 @@ from algo import IndicatorBundle
 
 ---
 
-### wallet（已移出本库）
-
-旧的 `Position / FutureWallet / Portfolio / SpotWallet` 实现已经删除。
-
-- 当前唯一有效的钱包 runtime 位于 `strategy-service/strategy_service/wallet/`
-- `strategy-service` 主链路统一通过
-  `strategy_service.wallet_factory.build_wallet_from_portfolio` 构造运行时
-- 本库现在只保留 `market_data`、`algo`、`utils` 这三类通用能力
-
----
-
-### utils（基础工具）
+### `utils.log`（日志与 tracing）
 
 ```python
 from utils.log import get_logger
-from utils.middleware.grpc import GRPCClientMiddleware
-from utils.middleware.kafka import KafkaConsumer
 ```
 
-| 模块 | 说明 |
-|---|---|
-| log | Python 日志中间件（对齐 elemental 格式） |
-| middleware.grpc | gRPC 客户端中间件（自动记录 RPC 日志） |
-| middleware.kafka | Kafka 消费端中间件 |
+`utils.log` 提供 Python Elemental 兼容的结构化日志、gRPC interceptor 和 OpenTelemetry tracing。`utils.middleware` 下还保留共享的 gRPC / Kafka middleware 封装。
 
 ---
 
@@ -79,10 +70,19 @@ from utils.middleware.kafka import KafkaConsumer
 ```
 Strategy Service
     -> Strategy Library
+        -> hushine_strategy（策略声明、校验、replay、策略可见钱包）
         -> market_data（数据来源）
         -> algo（指标计算）
-        -> utils（日志、gRPC、Kafka）
+        -> utils.log（日志、tracing）
+
+strategy-debugger-cli
+    -> hushine_strategy.validator / replay
+
+core-service order.v1
+    -> 订单执行与持久化
 ```
+
+生产钱包记账与 session 执行属于 strategy-service。真实订单统一通过 core-service `order.v1` 执行，不属于本库职责。
 
 ---
 
@@ -90,15 +90,10 @@ Strategy Service
 
 | 模块 | 状态 |
 |---|---|
+| hushine_strategy.types | ✅ 策略声明、订单决策与枚举 |
+| hushine_strategy.validator | ✅ 平台 / 本地共享校验 |
+| hushine_strategy.replay | ✅ strategy-debugger-cli 确定性 replay |
+| hushine_strategy.wallet | ✅ 策略可见 wallet helper；不承担生产记账 |
 | market_data | ✅ BacktestDataSource + LiveDataSource，已集成至 strategy_service.data_loop |
 | algo | ✅ RSI / MACD / BB / ATR / SMA / EMA / CCI / DMI + Bundle |
-| utils | ✅ 日志 + gRPC客户端 + Kafka消费端 |
-
-
-
----
-
-## 待开发
-
-- [ ] gRPC Scraper 控制接口（控制 Scraper 启动/停止，向 Kafka 写入数据）
-- [ ] 真实 Broker 订单服务（替换当前 Mock）
+| utils.log | ✅ Elemental 兼容日志、gRPC interceptor 与 tracing |
