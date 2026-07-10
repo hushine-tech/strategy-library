@@ -38,8 +38,7 @@ from market_data import BacktestDataSource, LiveDataSource
 ### `algo`（指标算法与 bundle）
 
 ```python
-from algo.indicators import RSI, MACD, BollingerBands, ATR
-from algo import IndicatorBundle
+from algo import IndicatorBundle, atr, bollinger_bands, macd, rsi
 ```
 
 | 指标 | 说明 |
