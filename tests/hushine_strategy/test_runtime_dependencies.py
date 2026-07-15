@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import threading
@@ -859,6 +860,7 @@ def test_runner_resanitizes_environment_and_uses_private_directories(
     assert kwargs["stdout"] is subprocess.PIPE
     assert kwargs["stderr"] is subprocess.PIPE
     assert kwargs["close_fds"] is True
+    assert kwargs["bufsize"] == 0
     environment = kwargs["env"]
     assert environment["PATH"] == supplied["PATH"]
     assert environment["LANG"] == "C.UTF-8"
@@ -1168,7 +1170,7 @@ def test_runner_cleans_up_when_reader_reports_failure(monkeypatch):
         "import time\ntime.sleep(60)\n",
     )
 
-    def failed_reader(_pipe, _buffer, _overflow, failed):
+    def failed_reader(_pipe, _buffer, _overflow, failed, _stop, _eof, _deadline):
         failed.set()
 
     monkeypatch.setattr(runtime_dependencies, "_read_bounded_pipe", failed_reader)
@@ -1183,6 +1185,65 @@ def test_runner_cleans_up_when_reader_reports_failure(monkeypatch):
 
     assert calls[0]["process"].poll() is not None
     assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
+
+
+def test_runner_deadline_survives_descendant_holding_both_pipes(monkeypatch, tmp_path):
+    profile = load_runtime_dependency_profile()
+    payload = canonical_probe_bytes(complete_probe_result(profile))
+    pid_path = tmp_path / "descendant.pid"
+    calls = install_helper_popen(
+        monkeypatch,
+        "import os, pathlib, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(2)'])\n"
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))\n"
+        f"os.write(1, {payload!r})\n",
+    )
+    monkeypatch.setattr(runtime_dependencies, "_PROBE_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(runtime_dependencies, "_PROBE_TERMINATE_GRACE_SECONDS", 0.1)
+    started = time.monotonic()
+
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="target dependency probe returned an invalid response",
+        ):
+            runtime_dependencies._run_installed_probe(
+                os.path.abspath(os.path.normpath(sys.executable)), ">=3.12", {}
+            )
+        assert time.monotonic() - started < 0.8
+        assert calls[0]["process"].poll() is not None
+        assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
+        assert not any(
+            thread.name.startswith("runtime-profile-probe-")
+            for thread in threading.enumerate()
+        )
+    finally:
+        if pid_path.exists():
+            try:
+                os.kill(int(pid_path.read_text()), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+
+
+def test_private_probe_marks_protocol_descriptors_noninheritable(monkeypatch):
+    profile = load_runtime_dependency_profile()
+    result = complete_probe_result(profile)
+    calls = []
+    monkeypatch.setattr(
+        runtime_dependencies.os,
+        "set_inheritable",
+        lambda descriptor, inheritable: calls.append((descriptor, inheritable)),
+    )
+    monkeypatch.setattr(
+        runtime_dependencies,
+        "_installed_probe_result",
+        lambda _profile, _constraint: result,
+    )
+    monkeypatch.setattr(runtime_dependencies, "_emit_json", lambda value: None)
+
+    assert runtime_dependencies._private_probe_main(["--json"]) == 0
+    assert calls == [(1, False), (2, False)]
 
 
 def test_runner_caps_both_pipes_and_reaps_on_overflow(monkeypatch):

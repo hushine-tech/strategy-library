@@ -80,6 +80,7 @@ _PROBE_ARGV_LIMIT = 8 * 1024
 _PROBE_PIPE_LIMIT = 64 * 1024
 _PROBE_TIMEOUT_SECONDS = 30.0
 _PROBE_TERMINATE_GRACE_SECONDS = 1.0
+_PROBE_PIPE_DRAIN_SECONDS = 0.1
 _PROBE_ROOT_PREFIX = "hushine-profile-probe-"
 _PROBE_THREAD_PREFIX = "runtime-profile-probe-"
 _PROBE_TOP_LEVEL_FIELDS = frozenset(
@@ -414,6 +415,8 @@ def _run_installed_probe(
     stderr_buffer = bytearray()
     overflow = threading.Event()
     reader_failed = threading.Event()
+    reader_stop = threading.Event()
+    reader_eof: list[threading.Event] = []
     failure = ""
     returncode: int | None = None
     deadline = time.monotonic() + _PROBE_TIMEOUT_SECONDS
@@ -436,6 +439,7 @@ def _run_installed_probe(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             close_fds=True,
+            bufsize=0,
         )
         if process.stdout is None or process.stderr is None:
             failure = "invalid"
@@ -444,13 +448,23 @@ def _run_installed_probe(
                 ("stdout", process.stdout, stdout_buffer),
                 ("stderr", process.stderr, stderr_buffer),
             ):
+                eof = threading.Event()
                 reader = threading.Thread(
                     target=_read_bounded_pipe,
-                    args=(pipe, buffer, overflow, reader_failed),
+                    args=(
+                        pipe,
+                        buffer,
+                        overflow,
+                        reader_failed,
+                        reader_stop,
+                        eof,
+                        deadline,
+                    ),
                     name=f"{_PROBE_THREAD_PREFIX}{name}",
                 )
                 reader.start()
                 readers.append(reader)
+                reader_eof.append(eof)
 
         while not failure:
             if overflow.is_set():
@@ -481,9 +495,12 @@ def _run_installed_probe(
                 failure = "invalid"
                 _terminate_and_reap(process, deadline)
 
+        reader_stop.set()
         _join_readers(readers, deadline)
         if any(reader.is_alive() for reader in readers):
             failure = failure or "invalid"
+        if not failure and not all(event.is_set() for event in reader_eof):
+            failure = "invalid"
             _terminate_and_reap(process, deadline)
             _close_process_pipes(process)
             _join_readers(readers, deadline)
@@ -503,8 +520,10 @@ def _run_installed_probe(
         if process is not None:
             if _process_is_running(process):
                 _terminate_and_reap(process, deadline)
-            _close_process_pipes(process)
+        reader_stop.set()
         _join_readers(readers, deadline)
+        if process is not None:
+            _close_process_pipes(process)
         if private_root is not None:
             if not _remove_private_probe_root(private_root):
                 failure = failure or "invalid"
@@ -605,14 +624,33 @@ def _read_bounded_pipe(
     buffer: bytearray,
     overflow: threading.Event,
     failed: threading.Event,
+    stop: threading.Event,
+    eof: threading.Event,
+    deadline: float,
 ) -> None:
+    drain_deadline: float | None = None
     try:
+        descriptor = pipe.fileno()
+        os.set_blocking(descriptor, False)
         while True:
-            chunk = pipe.read(8192)
+            try:
+                chunk = os.read(descriptor, 8192)
+            except BlockingIOError:
+                if not stop.is_set():
+                    stop.wait(0.01)
+                    continue
+                now = time.monotonic()
+                if drain_deadline is None:
+                    drain_deadline = min(
+                        deadline,
+                        now + _PROBE_PIPE_DRAIN_SECONDS,
+                    )
+                if now >= drain_deadline:
+                    return
+                time.sleep(min(0.005, drain_deadline - now))
+                continue
             if not chunk:
-                return
-            if not isinstance(chunk, bytes):
-                failed.set()
+                eof.set()
                 return
             remaining = (_PROBE_PIPE_LIMIT + 1) - len(buffer)
             if remaining > 0:
@@ -1053,6 +1091,8 @@ def _emit_json(value: dict[str, object]) -> None:
 
 
 def _private_probe_main(arguments: list[str]) -> int:
+    os.set_inheritable(1, False)
+    os.set_inheritable(2, False)
     parser = argparse.ArgumentParser(prog="runtime_dependencies _probe-installed")
     parser.add_argument(
         "--python-constraint",
