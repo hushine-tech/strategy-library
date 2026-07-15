@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -582,16 +583,13 @@ def test_installed_check_uses_one_target_process_and_sanitized_environment(
     assert check_installed_projection(profile, "/target/python", "3.13") == ()
     assert len(calls) == 1
     assert calls[0][0:2] == ("/target/python", "3.13")
-    assert {key: calls[0][2][key] for key in ("HOME", "LANG", "PATH")} == {
-        "HOME": "/safe/home",
+    assert {key: calls[0][2][key] for key in ("LANG", "PATH")} == {
         "LANG": "C.UTF-8",
         "PATH": "/safe/path",
     }
-    assert {key: calls[0][2][key] for key in build_facts} == build_facts
     assert all(
         key
         in {
-            "HOME",
             "LANG",
             "LANGUAGE",
             "LC_ADDRESS",
@@ -610,13 +608,10 @@ def test_installed_check_uses_one_target_process_and_sanitized_environment(
             "PATH",
             "SOURCE_DATE_EPOCH",
             "TZ",
-            "HUSHINE_RUNTIME_IMAGE_BUILD_ID",
-            "HUSHINE_RUNTIME_STRATEGY_LIBRARY_COMMIT",
-            "HUSHINE_RUNTIME_STRATEGY_SERVICE_COMMIT",
         }
         for key in calls[0][2]
     )
-    assert not set(poisoned).intersection(calls[0][2])
+    assert not (set(poisoned) | set(build_facts)).intersection(calls[0][2])
 
 
 def test_installed_check_rejects_missing_target_metadata(monkeypatch):
@@ -704,9 +699,47 @@ def test_installed_check_turns_target_process_failure_into_violation(monkeypatch
 
     monkeypatch.setattr(checker, "_run_installed_probe", fail)
 
-    assert codes(check_installed_projection(profile, "python", "3.13")) == [
-        "TARGET_PROBE_FAILED"
-    ]
+    violations = check_installed_projection(profile, "python", "3.13")
+    assert codes(violations) == ["TARGET_PROBE_FAILED"]
+    assert violations[0].project == "installed-runtime"
+    assert violations[0].message == "target dependency probe failed"
+
+
+def test_installed_check_uses_fixed_logical_target_for_every_violation(monkeypatch):
+    profile = profile_for("numpy")
+    result = successful_probe_result(profile, python_version="3.11.9")
+    result["contract_sha256"] = "wrong"
+    monkeypatch.setattr(checker, "_run_installed_probe", lambda *_: result)
+
+    violations = check_installed_projection(
+        profile, "/private/interpreter-canary", "3.13"
+    )
+
+    assert {item.project for item in violations} == {"installed-runtime"}
+    assert "interpreter-canary" not in json.dumps(
+        [checker._record_json(item) for item in violations]
+    )
+
+
+def test_configured_interpreter_normalizes_without_resolving_final_symlink(
+    monkeypatch, tmp_path
+):
+    target = tmp_path / "base-python"
+    target.write_text("placeholder")
+    invocation = tmp_path / "venv" / "bin" / "python"
+    invocation.parent.mkdir(parents=True)
+    invocation.symlink_to(target)
+    monkeypatch.chdir(tmp_path)
+    options = SimpleNamespace(
+        installed_python=["debugger=venv/bin/../bin/python"],
+        installed_python_version=["debugger=>=3.12"],
+    )
+
+    configured = checker._configured_interpreters(options, profile_for("numpy"))
+
+    expected = os.path.abspath(os.path.normpath("venv/bin/../bin/python"))
+    assert configured == [("debugger", expected, ">=3.12")]
+    assert configured[0][1] != os.path.realpath(expected)
 
 
 def test_initial_contract_digest_is_immutable_task_1_digest():

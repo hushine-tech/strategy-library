@@ -5,15 +5,19 @@ import contextlib
 from dataclasses import dataclass
 import hashlib
 import importlib
-import io
 import json
 from importlib import resources
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import tomllib
+from typing import BinaryIO, Mapping
 import warnings
 
 
@@ -27,9 +31,7 @@ _TOP_LEVEL_FIELDS = frozenset(
         "dependencies",
     }
 )
-_DEPENDENCY_FIELDS = frozenset(
-    {"import_root", "distribution", "probe", "public"}
-)
+_DEPENDENCY_FIELDS = frozenset({"import_root", "distribution", "probe", "public"})
 _SEMVER_PATTERN = re.compile(
     r"(?:0|[1-9][0-9]*)\."
     r"(?:0|[1-9][0-9]*)\."
@@ -41,8 +43,63 @@ _SEMVER_PATTERN = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
 _PATH_PATTERN = re.compile(
-    r"(?:[A-Za-z]:[\\/]|/)[^\s'\"\]\[(){};,]+"
+    r"(?:"
+    r"(?:\\\\\?\\)?[A-Za-z]:[\\/]"
+    r"|\\\\[^\\/\s]+[\\/][^\\/\s]+[\\/]"
+    r"|/"
+    r")[^\r\n'\"\]\[(){};,]*"
 )
+
+PROFILE_PROBE_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "SOURCE_DATE_EPOCH",
+        "LANG",
+        "LANGUAGE",
+        "LC_ADDRESS",
+        "LC_ALL",
+        "LC_COLLATE",
+        "LC_CTYPE",
+        "LC_IDENTIFICATION",
+        "LC_MEASUREMENT",
+        "LC_MESSAGES",
+        "LC_MONETARY",
+        "LC_NAME",
+        "LC_NUMERIC",
+        "LC_PAPER",
+        "LC_TELEPHONE",
+        "LC_TIME",
+        "TZ",
+        "SYSTEMROOT",
+        "WINDIR",
+    }
+)
+_PROFILE_WINDOWS_ENV_KEYS = frozenset({"SYSTEMROOT", "WINDIR"})
+_SOURCE_DATE_EPOCH_MAX_DIGITS = 20
+_PROBE_ARGV_LIMIT = 8 * 1024
+_PROBE_PIPE_LIMIT = 64 * 1024
+_PROBE_TIMEOUT_SECONDS = 30.0
+_PROBE_TERMINATE_GRACE_SECONDS = 1.0
+_PROBE_ROOT_PREFIX = "hushine-profile-probe-"
+_PROBE_THREAD_PREFIX = "runtime-profile-probe-"
+_PROBE_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "schema_version",
+        "profile_name",
+        "profile_version",
+        "hosted_python",
+        "debugger_python",
+        "contract_sha256",
+        "public_import_roots",
+        "public_distributions",
+        "dependencies",
+        "python_version",
+        "ok",
+        "failures",
+    }
+)
+_PROBE_DEPENDENCY_FIELDS = frozenset({"import_root", "distribution", "probe", "public"})
+_PROBE_FAILURE_FIELDS = frozenset({"import_root", "distribution", "probe", "reason"})
 
 
 @dataclass(frozen=True)
@@ -256,10 +313,7 @@ def probe_runtime_dependency_profile(
         selected_profile.hosted_python,
         selected_profile.debugger_python,
     }
-    if (
-        python_constraint is not None
-        and python_constraint not in supported_constraints
-    ):
+    if python_constraint is not None and python_constraint not in supported_constraints:
         raise ValueError(
             "python_constraint must match hosted_python or debugger_python"
         )
@@ -278,9 +332,7 @@ def probe_runtime_dependency_profile(
     if not isinstance(raw_failures, list):
         raise ValueError("target dependency probe returned invalid failures")
     failures: list[DependencyProbeFailure] = []
-    expected_fields = frozenset(
-        {"import_root", "distribution", "probe", "reason"}
-    )
+    expected_fields = frozenset({"import_root", "distribution", "probe", "reason"})
     for index, raw_failure in enumerate(raw_failures):
         failure = _require_exact_fields(
             raw_failure,
@@ -307,9 +359,7 @@ def probe_runtime_dependency_profile(
                 ),
             )
         )
-    return tuple(
-        sorted(failures, key=_failure_sort_key)
-    )
+    return tuple(sorted(failures, key=_failure_sort_key))
 
 
 def require_runtime_dependency_profile(
@@ -330,9 +380,7 @@ def require_runtime_dependency_profile(
             f"{failure.reason}"
             for failure in failures
         )
-        raise RuntimeError(
-            f"runtime dependency profile verification failed: {details}"
-        )
+        raise RuntimeError(f"runtime dependency profile verification failed: {details}")
     return selected_profile
 
 
@@ -341,6 +389,11 @@ def _run_installed_probe(
     constraint: str | None,
     env: dict[str, str],
 ) -> dict[str, object]:
+    if constraint not in {None, "3.13", ">=3.12"}:
+        raise ValueError("invalid target Python constraint")
+    if not _valid_probe_executable(executable):
+        raise ValueError("invalid target Python invocation")
+
     command = [
         executable,
         "-I",
@@ -351,36 +404,492 @@ def _run_installed_probe(
     if constraint is not None:
         command.extend(["--python-constraint", constraint])
     command.append("--json")
+    if not _valid_probe_argv(command):
+        raise ValueError("invalid target Python invocation")
+
+    private_root: Path | None = None
+    process: subprocess.Popen[bytes] | None = None
+    readers: list[threading.Thread] = []
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    overflow = threading.Event()
+    reader_failed = threading.Event()
+    failure = ""
+    returncode: int | None = None
+    deadline = time.monotonic() + _PROBE_TIMEOUT_SECONDS
+    cleanup_reserve = min(
+        _PROBE_TERMINATE_GRACE_SECONDS,
+        _PROBE_TIMEOUT_SECONDS / 2,
+    )
+    run_deadline = deadline - cleanup_reserve
     try:
-        completed = subprocess.run(
+        private_root = _create_private_probe_root()
+        child_environment = _private_probe_environment(
+            _probe_environment(env), private_root
+        )
+        process = subprocess.Popen(
             command,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=env,
-            timeout=30,
+            cwd=str(private_root / "cwd"),
+            env=child_environment,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
         )
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError("target dependency probe timed out") from error
-    if completed.returncode not in {0, 1}:
+        if process.stdout is None or process.stderr is None:
+            failure = "invalid"
+        else:
+            for name, pipe, buffer in (
+                ("stdout", process.stdout, stdout_buffer),
+                ("stderr", process.stderr, stderr_buffer),
+            ):
+                reader = threading.Thread(
+                    target=_read_bounded_pipe,
+                    args=(pipe, buffer, overflow, reader_failed),
+                    name=f"{_PROBE_THREAD_PREFIX}{name}",
+                )
+                reader.start()
+                readers.append(reader)
+
+        while not failure:
+            if overflow.is_set():
+                failure = "overflow"
+                break
+            if reader_failed.is_set():
+                failure = "invalid"
+                break
+            try:
+                returncode = process.poll()
+            except Exception:
+                failure = "invalid"
+                break
+            if returncode is not None:
+                break
+            remaining = run_deadline - time.monotonic()
+            if remaining <= 0:
+                failure = "timeout"
+                break
+            overflow.wait(min(0.01, remaining))
+
+        if failure:
+            _terminate_and_reap(process, deadline)
+        else:
+            try:
+                returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except Exception:
+                failure = "invalid"
+                _terminate_and_reap(process, deadline)
+
+        _join_readers(readers, deadline)
+        if any(reader.is_alive() for reader in readers):
+            failure = failure or "invalid"
+            _terminate_and_reap(process, deadline)
+            _close_process_pipes(process)
+            _join_readers(readers, deadline)
+        if any(reader.is_alive() for reader in readers):
+            failure = failure or "invalid"
+        if overflow.is_set():
+            failure = "overflow"
+        elif reader_failed.is_set():
+            failure = failure or "invalid"
+    except Exception:
+        if process is None:
+            failure = "launch"
+        else:
+            failure = failure or "invalid"
+            _terminate_and_reap(process, deadline)
+    finally:
+        if process is not None:
+            if _process_is_running(process):
+                _terminate_and_reap(process, deadline)
+            _close_process_pipes(process)
+        _join_readers(readers, deadline)
+        if private_root is not None:
+            if not _remove_private_probe_root(private_root):
+                failure = failure or "invalid"
+
+    if failure == "launch":
+        raise RuntimeError("target dependency probe could not be started") from None
+    if failure == "timeout":
+        raise RuntimeError("target dependency probe timed out") from None
+    if failure == "overflow":
+        raise RuntimeError("target dependency probe output limit exceeded") from None
+    if failure or returncode is None:
         raise RuntimeError(
-            "target dependency probe exited with status "
-            f"{completed.returncode}"
-        )
-    try:
-        result = json.loads(completed.stdout)
-    except (json.JSONDecodeError, TypeError) as error:
-        raise RuntimeError("target dependency probe returned invalid JSON") from error
-    if not isinstance(result, dict):
-        raise RuntimeError("target dependency probe returned invalid JSON")
+            "target dependency probe returned an invalid response"
+        ) from None
+
+    result = _parse_probe_response(
+        bytes(stdout_buffer), bytes(stderr_buffer), returncode
+    )
+    if result is None:
+        raise RuntimeError(
+            "target dependency probe returned an invalid response"
+        ) from None
     return result
 
 
-def _probe_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment.pop("PYTHONHOME", None)
-    environment.pop("PYTHONPATH", None)
+def _valid_probe_executable(executable: object) -> bool:
+    if not isinstance(executable, str) or not executable or "\0" in executable:
+        return False
+    if not os.path.isabs(executable) or os.path.normpath(executable) != executable:
+        return False
+    try:
+        executable.encode("utf-8", "strict")
+    except UnicodeError:
+        return False
+    return True
+
+
+def _valid_probe_argv(command: list[str]) -> bool:
+    try:
+        size = sum(len(item.encode("utf-8", "strict")) + 1 for item in command)
+    except UnicodeError:
+        return False
+    return size <= _PROBE_ARGV_LIMIT and all("\0" not in item for item in command)
+
+
+def _create_private_probe_root() -> Path:
+    root = Path(tempfile.mkdtemp(prefix=_PROBE_ROOT_PREFIX))
+    try:
+        if os.name != "nt":
+            root.chmod(0o700)
+        for name in ("cwd", "home", "tmp"):
+            directory = root / name
+            directory.mkdir(mode=0o700)
+            if os.name != "nt":
+                directory.chmod(0o700)
+    except Exception:
+        _remove_private_probe_root(root)
+        raise
+    return root
+
+
+def _remove_private_probe_root(root: Path) -> bool:
+    def make_removable(function, path, _error):
+        try:
+            os.chmod(path, 0o700)
+            function(path)
+        except Exception:
+            pass
+
+    for _attempt in range(2):
+        try:
+            shutil.rmtree(root, onerror=make_removable)
+        except Exception:
+            pass
+        try:
+            if not root.exists():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _private_probe_environment(
+    copied: Mapping[str, str], private_root: Path
+) -> dict[str, str]:
+    environment = dict(copied)
+    home = str(private_root / "home")
+    temporary = str(private_root / "tmp")
+    environment["HOME"] = home
+    if os.name == "nt":
+        environment["USERPROFILE"] = home
+    environment.update({"TEMP": temporary, "TMP": temporary, "TMPDIR": temporary})
+    return environment
+
+
+def _read_bounded_pipe(
+    pipe: BinaryIO,
+    buffer: bytearray,
+    overflow: threading.Event,
+    failed: threading.Event,
+) -> None:
+    try:
+        while True:
+            chunk = pipe.read(8192)
+            if not chunk:
+                return
+            if not isinstance(chunk, bytes):
+                failed.set()
+                return
+            remaining = (_PROBE_PIPE_LIMIT + 1) - len(buffer)
+            if remaining > 0:
+                buffer.extend(chunk[:remaining])
+            if len(buffer) > _PROBE_PIPE_LIMIT:
+                overflow.set()
+    except Exception:
+        failed.set()
+
+
+def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
+    for pipe in (process.stdout, process.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+
+def _terminate_and_reap(process: subprocess.Popen[bytes], deadline: float) -> bool:
+    if _process_is_running(process):
+        try:
+            process.terminate()
+        except Exception:
+            pass
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            process.wait(
+                timeout=min(
+                    _PROBE_TERMINATE_GRACE_SECONDS,
+                    remaining / 2,
+                )
+            )
+            return True
+        except Exception:
+            pass
+    try:
+        if process.poll() is None:
+            process.kill()
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+    try:
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except Exception:
+        pass
+    return not _process_is_running(process)
+
+
+def _process_is_running(process: subprocess.Popen[bytes]) -> bool:
+    try:
+        return process.poll() is None
+    except Exception:
+        return True
+
+
+def _join_readers(readers: list[threading.Thread], deadline: float) -> None:
+    for reader in readers:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        reader.join(remaining)
+
+
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_value: str):
+    raise ValueError("invalid JSON constant")
+
+
+def _parse_probe_response(
+    stdout: bytes, stderr: bytes, returncode: int
+) -> dict[str, object] | None:
+    if stderr or returncode not in {0, 1}:
+        return None
+    try:
+        text = stdout.decode("utf-8", "strict")
+        result = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_json_constant,
+        )
+        canonical = (
+            json.dumps(
+                result,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    try:
+        valid_payload = _valid_probe_payload(result, returncode)
+    except Exception:
+        return None
+    if stdout != canonical or not valid_payload:
+        return None
+    return result
+
+
+def _valid_probe_payload(value: object, returncode: int) -> bool:
+    if not isinstance(value, dict) or frozenset(value) != _PROBE_TOP_LEVEL_FIELDS:
+        return False
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        return False
+    for key in (
+        "profile_name",
+        "profile_version",
+        "hosted_python",
+        "debugger_python",
+        "contract_sha256",
+        "python_version",
+    ):
+        if not _valid_probe_text(value[key]):
+            return False
+    if value["profile_name"] != "platform-python-3.13":
+        return False
+    if _SEMVER_PATTERN.fullmatch(value["profile_version"]) is None:
+        return False
+    if value["hosted_python"] != "3.13" or value["debugger_python"] != ">=3.12":
+        return False
+    if re.fullmatch(r"[0-9a-f]{64}", value["contract_sha256"]) is None:
+        return False
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["python_version"]) is None:
+        return False
+
+    dependencies = value["dependencies"]
+    if not isinstance(dependencies, list) or not dependencies:
+        return False
+    dependency_keys: list[tuple[str, str, str]] = []
+    import_roots: list[str] = []
+    distributions: list[str] = []
+    probes: list[str] = []
+    public_roots: list[str] = []
+    public_distributions: list[str] = []
+    for dependency in dependencies:
+        if (
+            not isinstance(dependency, dict)
+            or frozenset(dependency) != _PROBE_DEPENDENCY_FIELDS
+        ):
+            return False
+        for key in ("import_root", "distribution", "probe"):
+            if not _valid_probe_text(dependency[key]):
+                return False
+        if type(dependency["public"]) is not bool:
+            return False
+        if dependency["probe"].split(".", 1)[0] != dependency["import_root"]:
+            return False
+        item_key = (
+            dependency["import_root"],
+            dependency["distribution"],
+            dependency["probe"],
+        )
+        dependency_keys.append(item_key)
+        import_roots.append(dependency["import_root"])
+        distributions.append(_normalize_distribution(dependency["distribution"]))
+        probes.append(dependency["probe"])
+        if dependency["public"]:
+            public_roots.append(dependency["import_root"])
+            public_distributions.append(dependency["distribution"])
+    if dependency_keys != sorted(dependency_keys):
+        return False
+    if any(
+        len(items) != len(set(items)) for items in (import_roots, distributions, probes)
+    ):
+        return False
+    if not isinstance(value["public_import_roots"], list) or not all(
+        _valid_probe_text(item) for item in value["public_import_roots"]
+    ):
+        return False
+    if not isinstance(value["public_distributions"], list) or not all(
+        _valid_probe_text(item) for item in value["public_distributions"]
+    ):
+        return False
+    if value["public_import_roots"] != sorted(public_roots):
+        return False
+    if value["public_distributions"] != sorted(public_distributions):
+        return False
+    if not public_roots:
+        return False
+
+    failures = value["failures"]
+    if not isinstance(failures, list):
+        return False
+    failure_keys: list[tuple[str, str, str, str]] = []
+    allowed_failure_targets = {
+        (dependency["import_root"], dependency["distribution"], dependency["probe"])
+        for dependency in dependencies
+    }
+    allowed_failure_targets.add(("sys", "CPython", "sys.version_info"))
+    for failure in failures:
+        if not isinstance(failure, dict) or frozenset(failure) != _PROBE_FAILURE_FIELDS:
+            return False
+        for key in ("import_root", "distribution", "probe", "reason"):
+            if not _valid_probe_text(failure[key]):
+                return False
+        if len(failure["reason"]) > 500:
+            return False
+        if (
+            failure["import_root"],
+            failure["distribution"],
+            failure["probe"],
+        ) not in allowed_failure_targets:
+            return False
+        failure_keys.append(
+            (
+                failure["import_root"],
+                _normalize_distribution(failure["distribution"]),
+                failure["probe"],
+                failure["reason"],
+            )
+        )
+    if failure_keys != sorted(failure_keys) or len(failure_keys) != len(
+        set(failure_keys)
+    ):
+        return False
+    if type(value["ok"]) is not bool:
+        return False
+    return (returncode == 0 and value["ok"] is True and not failures) or (
+        returncode == 1 and value["ok"] is False and bool(failures)
+    )
+
+
+def _valid_probe_text(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeError:
+        return False
+    return True
+
+
+def _probe_environment(
+    source: Mapping[str, str] | None = None,
+    *,
+    windows: bool | None = None,
+) -> dict[str, str]:
+    selected = os.environ if source is None else source
+    case_insensitive = os.name == "nt" if windows is None else windows
+    allowed = PROFILE_PROBE_ENV_KEYS
+    if not case_insensitive:
+        allowed = allowed - _PROFILE_WINDOWS_ENV_KEYS
+
+    environment: dict[str, str] = {}
+    seen: set[str] = set()
+    for raw_key, value in selected.items():
+        if not isinstance(raw_key, str) or not isinstance(value, str):
+            continue
+        canonical_key = raw_key.upper() if case_insensitive else raw_key
+        if canonical_key not in allowed:
+            continue
+        if canonical_key in seen:
+            raise ValueError("invalid profile probe environment")
+        seen.add(canonical_key)
+        if "\0" in value:
+            continue
+        if canonical_key == "SOURCE_DATE_EPOCH" and not (
+            value
+            and len(value) <= _SOURCE_DATE_EPOCH_MAX_DIGITS
+            and value.isascii()
+            and value.isdigit()
+        ):
+            continue
+        environment[canonical_key] = value
     return environment
 
 
@@ -409,9 +918,7 @@ def _safe_exception_reason(error: BaseException) -> str:
     message = str(error)
     redactions = set(sys.path)
     redactions.add(os.getcwd())
-    redactions.update(
-        value for value in os.environ.values() if len(value) >= 4
-    )
+    redactions.update(value for value in os.environ.values() if value)
     for value in sorted(redactions, key=lambda value: (-len(value), value)):
         if value:
             message = message.replace(value, "<redacted>")
@@ -481,8 +988,7 @@ def _installed_probe_result(
                 distribution="CPython",
                 probe="sys.version_info",
                 reason=(
-                    "PythonVersionMismatch: expected "
-                    f"{python_constraint}, got {actual}"
+                    f"PythonVersionMismatch: expected {python_constraint}, got {actual}"
                 ),
             )
         )
@@ -502,8 +1008,9 @@ def _installed_probe_result(
 
         try:
             with (
-                contextlib.redirect_stdout(io.StringIO()),
-                contextlib.redirect_stderr(io.StringIO()),
+                open(os.devnull, "w", encoding="utf-8") as output_sink,
+                contextlib.redirect_stdout(output_sink),
+                contextlib.redirect_stderr(output_sink),
                 warnings.catch_warnings(),
             ):
                 warnings.simplefilter("ignore")
@@ -531,7 +1038,18 @@ def _installed_probe_result(
 
 
 def _emit_json(value: dict[str, object]) -> None:
-    print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+    encoded = (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    sys.stdout.buffer.write(encoded)
+    sys.stdout.buffer.flush()
 
 
 def _private_probe_main(arguments: list[str]) -> int:

@@ -8,12 +8,12 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import sys
 import tomllib
 
 from hushine_strategy.runtime_dependencies import (
     RuntimeDependencyProfile,
     _parse_manifest,
+    _probe_environment,
     _run_installed_probe,
     load_runtime_dependency_profile,
 )
@@ -539,34 +539,6 @@ def check_baseline(
     )
 
 
-def _target_environment() -> dict[str, str]:
-    exact = {
-        "PATH",
-        "HOME",
-        "LANG",
-        "LANGUAGE",
-        "LC_ADDRESS",
-        "LC_ALL",
-        "LC_COLLATE",
-        "LC_CTYPE",
-        "LC_IDENTIFICATION",
-        "LC_MEASUREMENT",
-        "LC_MESSAGES",
-        "LC_MONETARY",
-        "LC_NAME",
-        "LC_NUMERIC",
-        "LC_PAPER",
-        "LC_TELEPHONE",
-        "LC_TIME",
-        "TZ",
-        "SOURCE_DATE_EPOCH",
-        "HUSHINE_RUNTIME_IMAGE_BUILD_ID",
-        "HUSHINE_RUNTIME_STRATEGY_LIBRARY_COMMIT",
-        "HUSHINE_RUNTIME_STRATEGY_SERVICE_COMMIT",
-    }
-    return {key: value for key, value in os.environ.items() if key in exact}
-
-
 def _version_matches(actual: str, expected: str) -> bool:
     try:
         parts = tuple(int(item) for item in actual.split("."))
@@ -590,14 +562,14 @@ def check_installed_projection(
         result = _run_installed_probe(
             python_executable,
             expected_python,
-            _target_environment(),
+            _probe_environment(),
         )
-    except (OSError, RuntimeError, ValueError) as error:
+    except (OSError, RuntimeError, ValueError):
         return (
             _violation(
                 "TARGET_PROBE_FAILED",
-                python_executable,
-                message=str(error),
+                "installed-runtime",
+                message="target dependency probe failed",
             ),
         )
     required = {
@@ -611,7 +583,7 @@ def check_installed_projection(
         "failures",
     }
     if not isinstance(result, dict) or not required.issubset(result):
-        return (_violation("TARGET_METADATA_MISSING", python_executable),)
+        return (_violation("TARGET_METADATA_MISSING", "installed-runtime"),)
 
     violations: list[ContractViolation] = []
     caller_metadata = {
@@ -624,32 +596,36 @@ def check_installed_projection(
     }
     if any(result.get(key) != value for key, value in caller_metadata.items()):
         violations.append(
-            _violation("CALLER_TARGET_PROFILE_MISMATCH", python_executable)
+            _violation("CALLER_TARGET_PROFILE_MISMATCH", "installed-runtime")
         )
     actual_python = result.get("python_version")
     if not isinstance(actual_python, str) or not _version_matches(
         actual_python, expected_python
     ):
-        violations.append(_violation("PYTHON_VERSION_MISMATCH", python_executable))
+        violations.append(_violation("PYTHON_VERSION_MISMATCH", "installed-runtime"))
 
     failures = result.get("failures")
     if not isinstance(failures, list):
-        violations.append(_violation("TARGET_METADATA_MISSING", python_executable))
+        violations.append(_violation("TARGET_METADATA_MISSING", "installed-runtime"))
         return _sorted_unique(violations)
     for failure in failures:
         if not isinstance(failure, dict):
-            violations.append(_violation("TARGET_METADATA_MISSING", python_executable))
+            violations.append(
+                _violation("TARGET_METADATA_MISSING", "installed-runtime")
+            )
             continue
         distribution = failure.get("distribution", "")
         reason = failure.get("reason", "")
         probe = failure.get("probe", "")
         if probe == "sys.version_info":
-            violations.append(_violation("PYTHON_VERSION_MISMATCH", python_executable))
+            violations.append(
+                _violation("PYTHON_VERSION_MISMATCH", "installed-runtime")
+            )
         elif isinstance(reason, str) and "PackageNotFoundError" in reason:
             violations.append(
                 _violation(
                     "INSTALLED_METADATA_MISSING",
-                    python_executable,
+                    "installed-runtime",
                     str(distribution),
                     reason,
                 )
@@ -658,7 +634,7 @@ def check_installed_projection(
             violations.append(
                 _violation(
                     "INSTALLED_PROBE_FAILED",
-                    python_executable,
+                    "installed-runtime",
                     str(distribution),
                     str(reason),
                 )
@@ -784,7 +760,8 @@ def _configured_interpreters(
             raise ContractConfigurationError(
                 f"{name} requires Python constraint {named_constraint}"
             )
-        configured.append((name, interpreters[name], constraint))
+        executable = os.path.abspath(os.path.normpath(interpreters[name]))
+        configured.append((name, executable, constraint))
     return configured
 
 
