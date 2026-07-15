@@ -1,0 +1,53 @@
+schema_version = 1
+profile_name = "platform-python-3.13"
+profile_version = "1.0.0"
+hosted_python = "3.13"
+debugger_python = ">=3.12"
+
+[[dependencies]]
+import_root = "dateutil"
+distribution = "python-dateutil"
+probe = "dateutil"
+public = true
+
+[[dependencies]]
+import_root = "google"
+distribution = "protobuf"
+probe = "google.protobuf"
+public = true
+
+[[dependencies]]
+import_root = "grpc"
+distribution = "grpcio"
+probe = "grpc"
+public = true
+
+[[dependencies]]
+import_root = "numpy"
+distribution = "numpy"
+probe = "numpy"
+public = true
+
+[[dependencies]]
+import_root = "pandas"
+distribution = "pandas"
+probe = "pandas"
+public = true
+
+[[dependencies]]
+import_root = "pydantic"
+distribution = "pydantic"
+probe = "pydantic"
+public = true
+
+[[dependencies]]
+import_root = "requests"
+distribution = "requests"
+probe = "requests"
+public = true
+
+[[dependencies]]
+import_root = "yaml"
+distribution = "PyYAML"
+probe = "yaml"
+public = true
