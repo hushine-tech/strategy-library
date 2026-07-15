@@ -462,6 +462,18 @@ def _git(
     )
 
 
+def _git_bytes(
+    repository: Path,
+    *arguments: str,
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+
+
 def check_baseline(
     repository: Path,
     baseline_ref: str,
@@ -491,12 +503,10 @@ def check_baseline(
         raise ContractConfigurationError("cannot inspect baseline manifest tree")
 
     if tree_paths:
-        baseline = _git(root, "show", f"{commit}:{MANIFEST_PATH}")
+        baseline = _git_bytes(root, "show", f"{commit}:{MANIFEST_PATH}")
         if baseline.returncode != 0:
             raise ContractConfigurationError("cannot read baseline manifest")
-        violations = check_profile_change(
-            baseline.stdout.encode("utf-8"), current_manifest
-        )
+        violations = check_profile_change(baseline.stdout, current_manifest)
         return BaselineCheckResult(
             ref=baseline_ref,
             commit=commit,

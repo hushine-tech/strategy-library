@@ -240,6 +240,24 @@ def test_existing_baseline_manifest_checks_monotonic_version(tmp_path):
     assert result.notices == ()
 
 
+def test_baseline_manifest_comparison_preserves_committed_bytes(tmp_path):
+    baseline = manifest_bytes(version="1.0.0", roots=("numpy",)).replace(b"\n", b"\r\n")
+    repo = git_repo_with_commit(
+        tmp_path,
+        {
+            ".gitattributes": "*.toml -text\n",
+            "hushine_strategy/runtime_dependencies.toml": baseline,
+        },
+    )
+    current = baseline.replace(b"\r\n", b"\n")
+
+    result = check_baseline(repo, "HEAD", current)
+
+    assert result.state == "present"
+    assert codes(result.violations) == ["PROFILE_VERSION_NOT_BUMPED"]
+    assert result.notices == ()
+
+
 def test_unresolved_baseline_ref_is_a_configuration_error(tmp_path):
     repo = git_repo_with_commit(tmp_path, {"README.md": "before\n"})
 
@@ -269,11 +287,15 @@ def test_baseline_manifest_read_failure_is_cli_configuration_error(
             return subprocess.CompletedProcess(
                 command, 0, f"{checker.MANIFEST_PATH}\n", ""
             )
-        if arguments == ("show", f"{commit}:{checker.MANIFEST_PATH}"):
-            return subprocess.CompletedProcess(command, 128, "", "object read failed")
         raise AssertionError(f"unexpected git invocation: {arguments!r}")
 
+    def git_bytes_result(repository, *arguments):
+        command = ["git", "-C", str(repository), *arguments]
+        assert arguments == ("show", f"{commit}:{checker.MANIFEST_PATH}")
+        return subprocess.CompletedProcess(command, 128, b"", b"object read failed")
+
     monkeypatch.setattr(checker, "_git", git_result)
+    monkeypatch.setattr(checker, "_git_bytes", git_bytes_result)
 
     status = checker.main(["--baseline-only", "--baseline-ref", "HEAD", "--json"])
 
