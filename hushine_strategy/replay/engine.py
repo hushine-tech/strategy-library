@@ -36,6 +36,29 @@ def _is_forbidden_export(value) -> bool:
     return bool(root) and root in FORBIDDEN_IMPORT_ROOTS
 
 
+def _safe_star_names(module: types.ModuleType) -> tuple[str, ...]:
+    try:
+        declared_names = getattr(module, "__all__")
+    except AttributeError:
+        candidate_names = sorted(
+            name for name in vars(module) if not name.startswith("_")
+        )
+    else:
+        candidate_names = tuple(declared_names)
+
+    safe_names: list[str] = []
+    for name in candidate_names:
+        if not isinstance(name, str) or name.startswith("_"):
+            continue
+        try:
+            value = getattr(module, name)
+            _safe_import_value(value)
+        except (AttributeError, ImportError):
+            continue
+        safe_names.append(name)
+    return tuple(safe_names)
+
+
 class _SafeModule:
     __slots__ = ("_module",)
 
@@ -46,6 +69,9 @@ class _SafeModule:
         if name in {"__name__", "__package__", "__doc__"}:
             module = object.__getattribute__(self, "_module")
             return getattr(module, name)
+        if name == "__all__":
+            module = object.__getattribute__(self, "_module")
+            return _safe_star_names(module)
         if name.startswith("_") or name in {"__builtins__", "__dict__"}:
             raise AttributeError(f"module attribute {name} is not available in replay strategy code")
         module = object.__getattribute__(self, "_module")
@@ -74,8 +100,6 @@ def _strategy_import(name, globals=None, locals=None, fromlist=(), level=0):
     root = _root(name)
     if level != 0 or root in FORBIDDEN_IMPORT_ROOTS or root not in ALLOWED_IMPORT_ROOTS:
         raise ImportError(f"import {name} is not allowed in replay strategy code")
-    if "." in str(name) and root != "hushine_strategy":
-        raise ImportError(f"import {name} is not allowed in replay strategy code")
     module = __import__(name, globals, locals, fromlist, level)
     for item in fromlist or ():
         if item == "*":
@@ -83,10 +107,6 @@ def _strategy_import(name, globals=None, locals=None, fromlist=(), level=0):
         if _root(item) in FORBIDDEN_IMPORT_ROOTS:
             raise ImportError(f"from {name} import {item} is not allowed in replay strategy code")
         value = getattr(module, item, None)
-        if isinstance(value, types.ModuleType):
-            value_root = _root(value.__name__)
-            if value_root != "hushine_strategy":
-                raise ImportError(f"from {name} import {item} is not allowed in replay strategy code")
         if _is_forbidden_export(value):
             raise ImportError(f"from {name} import {item} is not allowed in replay strategy code")
     return _safe_import_value(module)

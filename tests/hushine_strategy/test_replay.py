@@ -2,7 +2,9 @@ import pytest
 
 from hushine_strategy import Exchange, Market, OrderDecision, OrderSide, OrderType, PositionSide
 from hushine_strategy.replay.engine import ReplayConfig, run_replay
+from hushine_strategy.runtime_dependencies import load_runtime_dependency_profile
 from hushine_strategy.types import MarketData
+from hushine_strategy.validator import ALLOWED_IMPORT_ROOTS
 from hushine_strategy.wallet.futures import FuturesWallet
 
 
@@ -69,7 +71,6 @@ class MyStrategy:
     ORDER_TARGETS = []
 
     def on_market_data(self, data, wallet):
-        1 / 0
         self.leaked = common.os.name
         return None
 """
@@ -84,7 +85,6 @@ class MyStrategy:
     ORDER_TARGETS = []
 
     def on_market_data(self, data, wallet):
-        1 / 0
         self.leaked = common.os.name
         return None
 """
@@ -133,6 +133,54 @@ class MyStrategy:
             order_type=OrderType.MARKET,
             position_side=PositionSide.BOTH,
         )
+"""
+
+
+DOTTED_CONTRACT_IMPORTS_STRATEGY_CODE = """
+import collections.abc as collections_abc
+import pandas.io.common as pandas_common
+import requests.packages.urllib3 as requests_urllib3
+from hushine_strategy import Exchange, Market
+
+class MyStrategy:
+    INPUTS = [{"exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "symbol": "BTCUSDT", "interval": "1m"}]
+    ORDER_TARGETS = []
+
+    def on_market_data(self, data, wallet):
+        self.loaded = (
+            collections_abc.Iterable,
+            pandas_common.__name__,
+            requests_urllib3.__name__,
+        )
+        return None
+"""
+
+
+def _star_import_strategy_code(import_statement: str, symbol: str) -> str:
+    return (
+        f"{import_statement}\n"
+        "from hushine_strategy import Exchange, Market\n"
+        "class MyStrategy:\n"
+        "    INPUTS = [{\"exchange\": Exchange.BINANCE, \"market\": "
+        "Market.PERPETUAL_FUTURES, \"symbol\": \"BTCUSDT\", "
+        "\"interval\": \"1m\"}]\n"
+        "    ORDER_TARGETS = []\n"
+        f"    STAR_SYMBOL = {symbol}\n"
+        "    def on_market_data(self, data, wallet):\n"
+        "        return None\n"
+    )
+
+
+STAR_IMPORT_FORBIDDEN_EXPORT_STRATEGY_CODE = """
+from pandas.io.common import *
+LEAKED_MODULE = os
+
+class MyStrategy:
+    INPUTS = []
+    ORDER_TARGETS = []
+
+    def on_market_data(self, data, wallet):
+        return None
 """
 
 
@@ -388,7 +436,7 @@ def test_replay_rejects_forbidden_import_smuggling_before_execution():
         run_replay(ReplayConfig(strategy_code=SMUGGLED_IMPORT_STRATEGY_CODE, ticks=ticks, wallet=wallet))
 
 
-def test_replay_rejects_dotted_third_party_module_import_before_execution():
+def test_replay_rejects_forbidden_export_from_authorized_dotted_import():
     ticks = [
         MarketData(
             symbol="BTCUSDT",
@@ -400,11 +448,11 @@ def test_replay_rejects_dotted_third_party_module_import_before_execution():
         ),
     ]
     wallet = FuturesWallet(initial_balance=1000.0)
-    with pytest.raises(ValueError, match="strategy (import|validation) failed"):
+    with pytest.raises((AttributeError, ValueError, ImportError)):
         run_replay(ReplayConfig(strategy_code=SMUGGLED_DOTTED_MODULE_STRATEGY_CODE, ticks=ticks, wallet=wallet))
 
 
-def test_replay_rejects_third_party_module_fromlist_import_before_execution():
+def test_replay_rejects_forbidden_export_from_authorized_fromlist_import():
     ticks = [
         MarketData(
             symbol="BTCUSDT",
@@ -416,7 +464,7 @@ def test_replay_rejects_third_party_module_fromlist_import_before_execution():
         ),
     ]
     wallet = FuturesWallet(initial_balance=1000.0)
-    with pytest.raises(ValueError, match="strategy (import|validation) failed"):
+    with pytest.raises((AttributeError, ValueError, ImportError)):
         run_replay(ReplayConfig(strategy_code=SMUGGLED_FROMLIST_MODULE_STRATEGY_CODE, ticks=ticks, wallet=wallet))
 
 
@@ -452,6 +500,82 @@ def test_replay_allows_authoring_imports_for_numpy_pandas_and_order_decision():
     result = run_replay(ReplayConfig(strategy_code=ALLOWED_IMPORTS_STRATEGY_CODE, ticks=ticks, wallet=wallet))
     assert result.orders_filled == 1
     assert wallet.position_qty("BTCUSDT") == 0.01
+
+
+def test_replay_allowed_roots_derive_the_public_contract_without_legacy_algorithms():
+    public_roots = set(load_runtime_dependency_profile().public_import_roots)
+    assert public_roots <= ALLOWED_IMPORT_ROOTS
+    assert "hushine_strategy" in ALLOWED_IMPORT_ROOTS
+    assert ALLOWED_IMPORT_ROOTS.isdisjoint(
+        {"scipy", "sklearn", "statsmodels", "pandas_ta", "ta", "talib"}
+    )
+
+
+def test_replay_executes_authorized_dotted_and_runtime_alias_imports():
+    wallet = FuturesWallet(initial_balance=1000.0)
+    result = run_replay(
+        ReplayConfig(
+            strategy_code=DOTTED_CONTRACT_IMPORTS_STRATEGY_CODE,
+            ticks=[_btcusdt_tick()],
+            wallet=wallet,
+        )
+    )
+    assert result.bars_processed == 1
+
+
+@pytest.mark.parametrize(
+    ("import_statement", "symbol"),
+    [
+        ("from collections import *", "ChainMap"),
+        ("from requests import *", "Request"),
+        ("from pandas.io.common import *", "is_fsspec_url"),
+    ],
+)
+def test_replay_executes_authorized_stdlib_and_third_party_star_imports(
+    import_statement,
+    symbol,
+):
+    result = run_replay(
+        ReplayConfig(
+            strategy_code=_star_import_strategy_code(
+                import_statement,
+                symbol,
+            ),
+            ticks=[],
+            wallet=FuturesWallet(initial_balance=1000.0),
+        )
+    )
+    assert result.bars_processed == 0
+
+
+def test_replay_star_import_does_not_forward_forbidden_module_exports():
+    with pytest.raises(NameError, match="os"):
+        run_replay(
+            ReplayConfig(
+                strategy_code=STAR_IMPORT_FORBIDDEN_EXPORT_STRATEGY_CODE,
+                ticks=[],
+                wallet=FuturesWallet(initial_balance=1000.0),
+            )
+        )
+
+
+def test_replay_rejects_unsupported_dotted_root_before_execution():
+    strategy_code = (
+        "import scipy.sparse\n"
+        "class MyStrategy:\n"
+        "    INPUTS = []\n"
+        "    ORDER_TARGETS = []\n"
+        "    def on_market_data(self, data, wallet):\n"
+        "        return None\n"
+    )
+    with pytest.raises(ValueError, match="UNSUPPORTED_STRATEGY_DEPENDENCY"):
+        run_replay(
+            ReplayConfig(
+                strategy_code=strategy_code,
+                ticks=[],
+                wallet=FuturesWallet(initial_balance=1000.0),
+            )
+        )
 
 
 @pytest.mark.parametrize(
