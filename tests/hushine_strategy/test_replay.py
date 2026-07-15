@@ -1,7 +1,12 @@
 import pytest
 
 from hushine_strategy import Exchange, Market, OrderDecision, OrderSide, OrderType, PositionSide
-from hushine_strategy.replay.engine import ReplayConfig, run_replay
+from hushine_strategy.replay.engine import (
+    ReplayConfig,
+    _load_strategy,
+    _SafeModule,
+    run_replay,
+)
 from hushine_strategy.runtime_dependencies import load_runtime_dependency_profile
 from hushine_strategy.types import MarketData
 from hushine_strategy.validator import ALLOWED_IMPORT_ROOTS
@@ -168,6 +173,25 @@ def _star_import_strategy_code(import_statement: str, symbol: str) -> str:
         f"    STAR_SYMBOL = {symbol}\n"
         "    def on_market_data(self, data, wallet):\n"
         "        return None\n"
+    )
+
+
+def _requests_runtime_alias_strategy_code(
+    alias_import: str,
+    class_body: str,
+) -> str:
+    return (
+        "import requests as requests_root\n"
+        "import requests.packages as requests_packages\n"
+        f"{alias_import}\n"
+        "class MyStrategy:\n"
+        "    INPUTS = []\n"
+        "    ORDER_TARGETS = []\n"
+        "    ROOT_MODULE = requests_root\n"
+        "    PARENT_MODULE = requests_packages\n"
+        "    LEAF_MODULE = u\n"
+        "    ORDINARY_ATTRIBUTE = u.PoolManager\n"
+        f"    {class_body}\n"
     )
 
 
@@ -546,6 +570,55 @@ def test_replay_executes_authorized_stdlib_and_third_party_star_imports(
         )
     )
     assert result.bars_processed == 0
+
+
+def test_replay_star_import_wraps_registered_requests_runtime_alias():
+    strategy = _load_strategy(
+        _star_import_strategy_code(
+            "from requests.packages import *",
+            "urllib3",
+        ),
+        "strategy.py",
+    )
+    assert isinstance(strategy.STAR_SYMBOL, _SafeModule)
+
+
+@pytest.mark.parametrize(
+    "alias_import",
+    [
+        "import requests.packages.urllib3 as u",
+        "from requests.packages import urllib3 as u",
+    ],
+)
+def test_replay_runtime_alias_forms_keep_parent_and_leaf_modules_wrapped(
+    alias_import,
+):
+    strategy = _load_strategy(
+        _requests_runtime_alias_strategy_code(alias_import, "SAFE = True"),
+        "strategy.py",
+    )
+    assert isinstance(strategy.ROOT_MODULE, _SafeModule)
+    assert isinstance(strategy.PARENT_MODULE, _SafeModule)
+    assert isinstance(strategy.LEAF_MODULE, _SafeModule)
+    assert strategy.ORDINARY_ATTRIBUTE.__name__ == "PoolManager"
+
+
+@pytest.mark.parametrize(
+    "alias_import",
+    [
+        "import requests.packages.urllib3 as u",
+        "from requests.packages import urllib3 as u",
+    ],
+)
+def test_replay_runtime_alias_forms_cannot_escape_to_raw_os(alias_import):
+    with pytest.raises(ValueError, match="import os is not allowed"):
+        _load_strategy(
+            _requests_runtime_alias_strategy_code(
+                alias_import,
+                "LEAKED_MODULE = u.util.ssl_.os",
+            ),
+            "strategy.py",
+        )
 
 
 def test_replay_star_import_does_not_forward_forbidden_module_exports():

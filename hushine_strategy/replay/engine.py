@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import types
 from dataclasses import dataclass
 from inspect import getmodule
@@ -16,9 +17,30 @@ def _root(name: str) -> str:
     return str(name).split(".", 1)[0]
 
 
-def _is_forbidden_module(module: types.ModuleType) -> bool:
+def _is_registered_logical_alias(
+    module: types.ModuleType,
+    logical_name: str,
+) -> bool:
+    logical_root = _root(logical_name)
+    return (
+        bool(logical_name)
+        and logical_root in ALLOWED_IMPORT_ROOTS
+        and logical_root not in FORBIDDEN_IMPORT_ROOTS
+        and sys.modules.get(logical_name) is module
+    )
+
+
+def _is_forbidden_module(
+    module: types.ModuleType,
+    logical_name: str = "",
+) -> bool:
     root = _root(module.__name__)
-    return root in FORBIDDEN_IMPORT_ROOTS or root not in ALLOWED_IMPORT_ROOTS
+    if root in FORBIDDEN_IMPORT_ROOTS:
+        return True
+    return (
+        root not in ALLOWED_IMPORT_ROOTS
+        and not _is_registered_logical_alias(module, logical_name)
+    )
 
 
 def _value_module_root(value) -> str:
@@ -29,14 +51,17 @@ def _value_module_root(value) -> str:
     return _root(module_name) if module_name else ""
 
 
-def _is_forbidden_export(value) -> bool:
+def _is_forbidden_export(value, logical_name: str = "") -> bool:
     if isinstance(value, types.ModuleType):
-        return _is_forbidden_module(value)
+        return _is_forbidden_module(value, logical_name)
     root = _value_module_root(value)
     return bool(root) and root in FORBIDDEN_IMPORT_ROOTS
 
 
-def _safe_star_names(module: types.ModuleType) -> tuple[str, ...]:
+def _safe_star_names(
+    module: types.ModuleType,
+    logical_name: str,
+) -> tuple[str, ...]:
     try:
         declared_names = getattr(module, "__all__")
     except AttributeError:
@@ -52,7 +77,10 @@ def _safe_star_names(module: types.ModuleType) -> tuple[str, ...]:
             continue
         try:
             value = getattr(module, name)
-            _safe_import_value(value)
+            _safe_import_value(
+                value,
+                logical_name=f"{logical_name}.{name}",
+            )
         except (AttributeError, ImportError):
             continue
         safe_names.append(name)
@@ -60,9 +88,15 @@ def _safe_star_names(module: types.ModuleType) -> tuple[str, ...]:
 
 
 class _SafeModule:
-    __slots__ = ("_module",)
+    __slots__ = ("_logical_name", "_module")
 
-    def __init__(self, module: types.ModuleType) -> None:
+    def __init__(
+        self,
+        module: types.ModuleType,
+        *,
+        logical_name: str,
+    ) -> None:
+        object.__setattr__(self, "_logical_name", logical_name)
         object.__setattr__(self, "_module", module)
 
     def __getattribute__(self, name: str):
@@ -71,26 +105,38 @@ class _SafeModule:
             return getattr(module, name)
         if name == "__all__":
             module = object.__getattribute__(self, "_module")
-            return _safe_star_names(module)
+            logical_name = object.__getattribute__(self, "_logical_name")
+            return _safe_star_names(module, logical_name)
         if name.startswith("_") or name in {"__builtins__", "__dict__"}:
             raise AttributeError(f"module attribute {name} is not available in replay strategy code")
         module = object.__getattribute__(self, "_module")
-        value = getattr(module, name)
-        if _is_forbidden_export(value):
-            raise AttributeError(f"module attribute {name} is not available in replay strategy code")
-        return _safe_import_value(value)
+        logical_name = object.__getattribute__(self, "_logical_name")
+        child_logical_name = f"{logical_name}.{name}"
+        try:
+            value = getattr(module, name)
+        except AttributeError:
+            value = sys.modules.get(child_logical_name)
+            if not isinstance(value, types.ModuleType):
+                raise
+        return _safe_import_value(
+            value,
+            logical_name=child_logical_name,
+        )
 
     def __repr__(self) -> str:
         module = object.__getattribute__(self, "_module")
         return f"<safe module {module.__name__!r}>"
 
 
-def _safe_import_value(value):
+def _safe_import_value(value, *, logical_name: str = ""):
     if isinstance(value, types.ModuleType):
-        if _is_forbidden_module(value):
+        if _is_forbidden_module(value, logical_name):
             raise ImportError(f"import {value.__name__} is not allowed in replay strategy code")
-        return _SafeModule(value)
-    if _is_forbidden_export(value):
+        return _SafeModule(
+            value,
+            logical_name=logical_name or value.__name__,
+        )
+    if _is_forbidden_export(value, logical_name):
         module_name = getattr(value, "__module__", "")
         raise ImportError(f"import from {module_name} is not allowed in replay strategy code")
     return value
@@ -107,9 +153,10 @@ def _strategy_import(name, globals=None, locals=None, fromlist=(), level=0):
         if _root(item) in FORBIDDEN_IMPORT_ROOTS:
             raise ImportError(f"from {name} import {item} is not allowed in replay strategy code")
         value = getattr(module, item, None)
-        if _is_forbidden_export(value):
+        if _is_forbidden_export(value, f"{name}.{item}"):
             raise ImportError(f"from {name} import {item} is not allowed in replay strategy code")
-    return _safe_import_value(module)
+    logical_name = name if fromlist else module.__name__
+    return _safe_import_value(module, logical_name=logical_name)
 
 
 _SAFE_BUILTINS = {
