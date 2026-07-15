@@ -746,6 +746,110 @@ class TestRequestProtocol:
             ):
                 client()
 
+    @pytest.mark.parametrize("container_type", [list, tuple])
+    def test_public_probe_rejects_import_container_subclasses_before_hooks_or_transport(
+        self, monkeypatch, container_type
+    ):
+        hook_calls = []
+
+        class DerivedImports(container_type):
+            def __len__(self):
+                hook_calls.append("len")
+                return super().__len__()
+
+            def __iter__(self):
+                hook_calls.append("iter")
+                return super().__iter__()
+
+        imports = DerivedImports([_import()])
+        monkeypatch.setattr(
+            protocol,
+            "run_probe",
+            lambda *_args, **_kwargs: pytest.fail(
+                "container subclass reached transport"
+            ),
+        )
+
+        with pytest.raises(ImportProbeProtocolError, match=r"^invalid import request$"):
+            probe_import_records(
+                imports,
+                python_invocation_path=PYTHON,
+                expected_profile=EXPECTED_PROFILE,
+            )
+
+        assert hook_calls == []
+
+    @pytest.mark.parametrize("client_name", ["public", "test_seam"])
+    def test_probe_clients_reject_exact_list_imports_before_transport(
+        self, monkeypatch, tmp_path, client_name
+    ):
+        monkeypatch.setattr(
+            protocol,
+            "run_probe",
+            lambda *_args, **_kwargs: pytest.fail("exact list reached transport"),
+        )
+
+        def client():
+            if client_name == "public":
+                return probe_import_records(
+                    [_import()],
+                    python_invocation_path=PYTHON,
+                    expected_profile=EXPECTED_PROFILE,
+                )
+            return protocol._probe_import_records_for_test(
+                [_import()],
+                python_invocation_path=PYTHON,
+                expected_profile=EXPECTED_PROFILE,
+                extra_python_path=(str(tmp_path),),
+            )
+
+        with pytest.raises(ImportProbeProtocolError, match=r"^invalid import request$"):
+            client()
+
+    @pytest.mark.parametrize("case", ["exact_list", "tuple_subclass", "str_subclass"])
+    def test_private_probe_rejects_nonexact_extra_paths_before_hooks_or_transport(
+        self, monkeypatch, tmp_path, case
+    ):
+        hook_calls = []
+
+        class DerivedPaths(tuple):
+            def __len__(self):
+                hook_calls.append("len")
+                return super().__len__()
+
+            def __iter__(self):
+                hook_calls.append("iter")
+                return super().__iter__()
+
+        class DerivedPath(str):
+            def encode(self, *_args, **_kwargs):
+                hook_calls.append("encode")
+                return b"/safe-looking-path"
+
+        path = str(tmp_path)
+        variants = {
+            "exact_list": [path],
+            "tuple_subclass": DerivedPaths((path,)),
+            "str_subclass": (DerivedPath(path),),
+        }
+        monkeypatch.setattr(
+            protocol,
+            "run_probe",
+            lambda *_args, **_kwargs: pytest.fail(
+                "invalid extra path reached transport"
+            ),
+        )
+
+        with pytest.raises(ImportProbeProtocolError, match=r"^invalid import request$"):
+            protocol._probe_import_records_for_test(
+                (),
+                python_invocation_path=PYTHON,
+                expected_profile=EXPECTED_PROFILE,
+                extra_python_path=variants[case],
+            )
+
+        assert hook_calls == []
+
     def test_canonical_request_has_exact_shapes_ascii_and_one_lf(self, tmp_path):
         imports = (
             _import("numpy", line=2, column=4),
@@ -1220,6 +1324,46 @@ class TestTransportPolicies:
         )
         assert transport.valid_probe_argv([UnderreportedArg(PYTHON), "-I"]) is False
 
+    @pytest.mark.parametrize("container_type", [list, tuple])
+    def test_run_probe_rejects_command_container_subclasses_before_hooks_or_actions(
+        self, monkeypatch, container_type
+    ):
+        hook_calls = []
+
+        class SwitchingCommand(container_type):
+            def __len__(self):
+                hook_calls.append("len")
+                return super().__len__()
+
+            def __getitem__(self, index):
+                hook_calls.append("getitem")
+                return super().__getitem__(index)
+
+            def __iter__(self):
+                hook_calls.append("iter")
+                return super().__iter__()
+
+        command = SwitchingCommand([PYTHON, "-I", "-c", "pass"])
+        monkeypatch.setattr(
+            transport,
+            "create_private_probe_root",
+            lambda *_args, **_kwargs: pytest.fail("private root was created"),
+        )
+        monkeypatch.setattr(
+            transport.subprocess,
+            "Popen",
+            lambda *_args, **_kwargs: pytest.fail("process was launched"),
+        )
+
+        with pytest.raises(ValueError, match=r"^invalid target Python invocation$"):
+            transport.run_probe(
+                command,
+                environment_policy=transport.IMPORT_PROBE_POLICY,
+                timeout_seconds=1,
+            )
+
+        assert hook_calls == []
+
     def test_unknown_or_union_environment_policy_is_rejected_before_launch(
         self, monkeypatch
     ):
@@ -1319,7 +1463,12 @@ class TestTransportLifecycle:
         calls = []
 
         def helper_popen(argv, **kwargs):
-            call = {"argv": list(argv), "kwargs": kwargs, "process": None}
+            call = {
+                "argv": list(argv),
+                "argv_object": argv,
+                "kwargs": kwargs,
+                "process": None,
+            }
             calls.append(call)
             process = real_popen([sys.executable, "-c", helper_source], **kwargs)
             call["process"] = process
@@ -1327,6 +1476,25 @@ class TestTransportLifecycle:
 
         monkeypatch.setattr(transport.subprocess, "Popen", helper_popen)
         return calls
+
+    @pytest.mark.parametrize("container_type", [list, tuple])
+    def test_valid_command_is_frozen_before_popen(self, monkeypatch, container_type):
+        command = container_type([PYTHON, "-I", "-c", "pass"])
+        calls = self._install_helper_popen(monkeypatch, "pass\n")
+
+        result = transport.run_probe(
+            command,
+            environment_policy=transport.IMPORT_PROBE_POLICY,
+            timeout_seconds=1,
+        )
+
+        assert result.returncode == 0
+        assert type(calls[0]["argv_object"]) is tuple
+        assert calls[0]["argv_object"] == tuple(command)
+        if container_type is list:
+            assert calls[0]["argv_object"] is not command
+        else:
+            assert calls[0]["argv_object"] is command
 
     def test_request_writer_sends_exact_bytes_and_private_environment(
         self, monkeypatch

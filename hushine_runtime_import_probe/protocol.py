@@ -7,7 +7,7 @@ import keyword
 import os
 import re
 import sys
-from typing import Iterable, Literal, Mapping, Sequence
+from typing import Iterable, Literal, Mapping
 
 from hushine_runtime_import_probe.transport import (
     IMPORT_PROBE_POLICY,
@@ -343,18 +343,25 @@ def _normalize_import_record(
 def _normalize_imports(
     values: object, *, allow_mapping: bool
 ) -> list[dict[str, object]]:
-    if not isinstance(values, (list, tuple)) or len(values) > MAX_IMPORT_RECORDS:
+    if type(values) is not list and type(values) is not tuple:
+        raise _request_error()
+    snapshot = tuple(values)
+    if len(snapshot) > MAX_IMPORT_RECORDS:
         raise _request_error()
     return [
-        _normalize_import_record(value, allow_mapping=allow_mapping) for value in values
+        _normalize_import_record(value, allow_mapping=allow_mapping)
+        for value in snapshot
     ]
 
 
 def _normalize_extra_python_path(values: object) -> list[str]:
-    if not isinstance(values, (list, tuple)) or len(values) > MAX_EXTRA_PYTHON_PATHS:
+    if type(values) is not list and type(values) is not tuple:
+        raise _request_error()
+    snapshot = tuple(values)
+    if len(snapshot) > MAX_EXTRA_PYTHON_PATHS:
         raise _request_error()
     normalized: list[str] = []
-    for value in values:
+    for value in snapshot:
         if (
             not _bounded_text(value, maximum=MAX_EXTRA_PYTHON_PATH_BYTES)
             or "\0" in value
@@ -471,8 +478,8 @@ def _canonical_bytes(value: object) -> bytes:
 def encode_import_request(
     *,
     expected_profile: ExpectedProfile | Mapping[str, object],
-    imports: Sequence[ImportRecord],
-    extra_python_path: Sequence[str] = (),
+    imports: list[ImportRecord] | tuple[ImportRecord, ...],
+    extra_python_path: list[str] | tuple[str, ...] = (),
 ) -> bytes:
     value = {
         "schema_version": SCHEMA_VERSION,
@@ -639,7 +646,7 @@ def decode_import_response(
 
 
 def probe_import_records(
-    imports: Sequence[ImportRecord],
+    imports: tuple[ImportRecord, ...],
     *,
     python_invocation_path: str,
     expected_profile: ExpectedProfile,
@@ -655,12 +662,12 @@ def probe_import_records(
 
 
 def _probe_import_records_for_test(
-    imports: Sequence[ImportRecord],
+    imports: tuple[ImportRecord, ...],
     *,
     python_invocation_path: str,
     expected_profile: ExpectedProfile,
     timeout_seconds: float = 30.0,
-    extra_python_path: Sequence[str] = (),
+    extra_python_path: tuple[str, ...] = (),
 ) -> ImportProbeResult:
     return _probe_import_records(
         imports,
@@ -672,13 +679,15 @@ def _probe_import_records_for_test(
 
 
 def _probe_import_records(
-    imports: Sequence[ImportRecord],
+    imports: tuple[ImportRecord, ...],
     *,
     python_invocation_path: str,
     expected_profile: ExpectedProfile,
     timeout_seconds: float,
-    extra_python_path: Sequence[str],
+    extra_python_path: tuple[str, ...],
 ) -> ImportProbeResult:
+    if type(imports) is not tuple or type(extra_python_path) is not tuple:
+        raise _request_error()
     if type(expected_profile) is not ExpectedProfile:
         raise _request_error()
     request = encode_import_request(

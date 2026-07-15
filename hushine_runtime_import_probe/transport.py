@@ -257,19 +257,26 @@ def _private_probe_environment(
     return environment
 
 
-def valid_probe_argv(command: object) -> bool:
-    if not isinstance(command, (list, tuple)) or not command:
-        return False
-    if any(type(item) is not str or not item or "\0" in item for item in command):
-        return False
-    executable = command[0]
+def _validated_probe_argv_snapshot(command: object) -> tuple[str, ...] | None:
+    if type(command) is not list and type(command) is not tuple:
+        return None
+    snapshot = tuple(command)
+    if not snapshot:
+        return None
+    if any(type(item) is not str or not item or "\0" in item for item in snapshot):
+        return None
+    executable = snapshot[0]
     if not os.path.isabs(executable) or os.path.normpath(executable) != executable:
-        return False
+        return None
     try:
-        size = sum(len(item.encode("utf-8", "strict")) + 1 for item in command)
+        size = sum(len(item.encode("utf-8", "strict")) + 1 for item in snapshot)
     except UnicodeError:
-        return False
-    return size <= PROBE_ARGV_LIMIT
+        return None
+    return snapshot if size <= PROBE_ARGV_LIMIT else None
+
+
+def valid_probe_argv(command: object) -> bool:
+    return _validated_probe_argv_snapshot(command) is not None
 
 
 def _valid_timeout(value: object) -> bool:
@@ -733,7 +740,7 @@ def _join_threads(threads: list[threading.Thread], deadline: float) -> bool:
 
 
 def run_probe(
-    command: list[str],
+    command: list[str] | tuple[str, ...],
     *,
     environment_policy: object,
     timeout_seconds: float,
@@ -744,7 +751,8 @@ def run_probe(
     if not _valid_timeout(timeout_seconds):
         raise ValueError("invalid probe timeout")
     _environment_keys(environment_policy)
-    if not valid_probe_argv(command):
+    command_snapshot = _validated_probe_argv_snapshot(command)
+    if command_snapshot is None:
         raise ValueError("invalid target Python invocation")
     if stdin_bytes is not None and (
         not isinstance(stdin_bytes, bytes) or len(stdin_bytes) > PROBE_PIPE_LIMIT
@@ -781,7 +789,7 @@ def run_probe(
             private_root,
         )
         process = subprocess.Popen(
-            command,
+            command_snapshot,
             cwd=str(private_root / "cwd"),
             env=environment,
             shell=False,
