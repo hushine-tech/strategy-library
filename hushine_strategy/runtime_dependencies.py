@@ -10,16 +10,12 @@ from importlib import resources
 import os
 from pathlib import Path
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
-import threading
-import time
 import tomllib
-from typing import BinaryIO, Mapping
+from typing import Mapping
 import warnings
 
+import hushine_runtime_import_probe.transport as probe_transport
 
 _TOP_LEVEL_FIELDS = frozenset(
     {
@@ -50,40 +46,7 @@ _PATH_PATTERN = re.compile(
     r")[^\r\n'\"\]\[(){};,]*"
 )
 
-PROFILE_PROBE_ENV_KEYS = frozenset(
-    {
-        "PATH",
-        "SOURCE_DATE_EPOCH",
-        "LANG",
-        "LANGUAGE",
-        "LC_ADDRESS",
-        "LC_ALL",
-        "LC_COLLATE",
-        "LC_CTYPE",
-        "LC_IDENTIFICATION",
-        "LC_MEASUREMENT",
-        "LC_MESSAGES",
-        "LC_MONETARY",
-        "LC_NAME",
-        "LC_NUMERIC",
-        "LC_PAPER",
-        "LC_TELEPHONE",
-        "LC_TIME",
-        "TZ",
-        "SYSTEMROOT",
-        "WINDIR",
-    }
-)
-_PROFILE_WINDOWS_ENV_KEYS = frozenset({"SYSTEMROOT", "WINDIR"})
-_SOURCE_DATE_EPOCH_MAX_DIGITS = 20
-_PROBE_ARGV_LIMIT = 8 * 1024
-_PROBE_PIPE_LIMIT = 64 * 1024
-_PROBE_TIMEOUT_SECONDS = 30.0
-_PROBE_TERMINATE_GRACE_SECONDS = 1.0
-_PROBE_PIPE_DRAIN_SECONDS = 0.1
-_PROBE_ROOT_PREFIX = "hushine-profile-probe-"
-_PROBE_THREAD_PREFIX = "runtime-profile-probe-"
-_WINDOWS_SECURE_DIRECTORY_MIN_VERSION = (3, 12, 4)
+PROFILE_PROBE_ENV_KEYS = probe_transport.PROFILE_PROBE_ENV_KEYS
 _PROBE_TOP_LEVEL_FIELDS = frozenset(
     {
         "schema_version",
@@ -393,8 +356,6 @@ def _run_installed_probe(
 ) -> dict[str, object]:
     if constraint not in {None, "3.13", ">=3.12"}:
         raise ValueError("invalid target Python constraint")
-    if not _valid_probe_executable(executable):
-        raise ValueError("invalid target Python invocation")
 
     command = [
         executable,
@@ -406,332 +367,41 @@ def _run_installed_probe(
     if constraint is not None:
         command.extend(["--python-constraint", constraint])
     command.append("--json")
-    if not _valid_probe_argv(command):
+    if not probe_transport.valid_probe_argv(command):
         raise ValueError("invalid target Python invocation")
 
-    private_root: Path | None = None
-    process: subprocess.Popen[bytes] | None = None
-    readers: list[threading.Thread] = []
-    stdout_buffer = bytearray()
-    stderr_buffer = bytearray()
-    overflow = threading.Event()
-    reader_failed = threading.Event()
-    reader_stop = threading.Event()
-    reader_eof: list[threading.Event] = []
-    failure = ""
-    returncode: int | None = None
-    deadline = time.monotonic() + _PROBE_TIMEOUT_SECONDS
-    cleanup_reserve = min(
-        _PROBE_TERMINATE_GRACE_SECONDS,
-        _PROBE_TIMEOUT_SECONDS / 2,
-    )
-    run_deadline = deadline - cleanup_reserve
     try:
-        private_root = _create_private_probe_root()
-        child_environment = _private_probe_environment(
-            _probe_environment(env), private_root
-        )
-        process = subprocess.Popen(
+        completed = probe_transport.run_probe(
             command,
-            cwd=str(private_root / "cwd"),
-            env=child_environment,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-            bufsize=0,
+            environment_policy=probe_transport.PROFILE_PROBE_POLICY,
+            source_environment=env,
+            stdin_bytes=None,
+            timeout_seconds=probe_transport.PROFILE_PROBE_TIMEOUT_SECONDS,
+            thread_prefix="runtime-profile-probe-",
         )
-        if process.stdout is None or process.stderr is None:
-            failure = "invalid"
-        else:
-            for name, pipe, buffer in (
-                ("stdout", process.stdout, stdout_buffer),
-                ("stderr", process.stderr, stderr_buffer),
-            ):
-                eof = threading.Event()
-                reader = threading.Thread(
-                    target=_read_bounded_pipe,
-                    args=(
-                        pipe,
-                        buffer,
-                        overflow,
-                        reader_failed,
-                        reader_stop,
-                        eof,
-                        deadline,
-                    ),
-                    name=f"{_PROBE_THREAD_PREFIX}{name}",
-                )
-                reader.start()
-                readers.append(reader)
-                reader_eof.append(eof)
-
-        while not failure:
-            if overflow.is_set():
-                failure = "overflow"
-                break
-            if reader_failed.is_set():
-                failure = "invalid"
-                break
-            try:
-                returncode = process.poll()
-            except Exception:
-                failure = "invalid"
-                break
-            if returncode is not None:
-                break
-            remaining = run_deadline - time.monotonic()
-            if remaining <= 0:
-                failure = "timeout"
-                break
-            overflow.wait(min(0.01, remaining))
-
-        if failure:
-            _terminate_and_reap(process, deadline)
-        else:
-            try:
-                returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
-            except Exception:
-                failure = "invalid"
-                _terminate_and_reap(process, deadline)
-
-        reader_stop.set()
-        _join_readers(readers, deadline)
-        if any(reader.is_alive() for reader in readers):
-            failure = failure or "invalid"
-        if not failure and not all(event.is_set() for event in reader_eof):
-            failure = "invalid"
-            _terminate_and_reap(process, deadline)
-            _close_process_pipes(process)
-            _join_readers(readers, deadline)
-        if any(reader.is_alive() for reader in readers):
-            failure = failure or "invalid"
-        if overflow.is_set():
-            failure = "overflow"
-        elif reader_failed.is_set():
-            failure = failure or "invalid"
-    except Exception:
-        if process is None:
-            failure = "launch"
-        else:
-            failure = failure or "invalid"
-            _terminate_and_reap(process, deadline)
-    finally:
-        if process is not None:
-            if _process_is_running(process):
-                _terminate_and_reap(process, deadline)
-        reader_stop.set()
-        _join_readers(readers, deadline)
-        if process is not None:
-            _close_process_pipes(process)
-        if private_root is not None:
-            if not _remove_private_probe_root(private_root):
-                failure = failure or "invalid"
-
-    if failure == "launch":
-        raise RuntimeError("target dependency probe could not be started") from None
-    if failure == "timeout":
-        raise RuntimeError("target dependency probe timed out") from None
-    if failure == "overflow":
-        raise RuntimeError("target dependency probe output limit exceeded") from None
-    if failure or returncode is None:
+    except probe_transport.ProbeTransportError as error:
+        messages = {
+            "launch": "target dependency probe could not be started",
+            "timeout": "target dependency probe timed out",
+            "overflow": "target dependency probe output limit exceeded",
+        }
         raise RuntimeError(
-            "target dependency probe returned an invalid response"
+            messages.get(
+                error.kind,
+                "target dependency probe returned an invalid response",
+            )
         ) from None
 
     result = _parse_probe_response(
-        bytes(stdout_buffer), bytes(stderr_buffer), returncode
+        completed.stdout,
+        completed.stderr,
+        completed.returncode,
     )
     if result is None:
         raise RuntimeError(
             "target dependency probe returned an invalid response"
         ) from None
     return result
-
-
-def _valid_probe_executable(executable: object) -> bool:
-    if not isinstance(executable, str) or not executable or "\0" in executable:
-        return False
-    if not os.path.isabs(executable) or os.path.normpath(executable) != executable:
-        return False
-    try:
-        executable.encode("utf-8", "strict")
-    except UnicodeError:
-        return False
-    return True
-
-
-def _valid_probe_argv(command: list[str]) -> bool:
-    try:
-        size = sum(len(item.encode("utf-8", "strict")) + 1 for item in command)
-    except UnicodeError:
-        return False
-    return size <= _PROBE_ARGV_LIMIT and all("\0" not in item for item in command)
-
-
-def _create_private_probe_root() -> Path:
-    if not _secure_private_directories_supported():
-        raise RuntimeError("secure private probe directories are unavailable")
-    root = Path(tempfile.mkdtemp(prefix=_PROBE_ROOT_PREFIX))
-    try:
-        if os.name != "nt":
-            root.chmod(0o700)
-        for name in ("cwd", "home", "tmp"):
-            directory = root / name
-            directory.mkdir(mode=0o700)
-            if os.name != "nt":
-                directory.chmod(0o700)
-    except Exception:
-        _remove_private_probe_root(root)
-        raise
-    return root
-
-
-def _secure_private_directories_supported(
-    *,
-    platform_name: str | None = None,
-    version_info: tuple[int, int, int] | None = None,
-) -> bool:
-    selected_platform = os.name if platform_name is None else platform_name
-    selected_version = (
-        tuple(sys.version_info[:3]) if version_info is None else version_info
-    )
-    return selected_platform != "nt" or (
-        selected_version >= _WINDOWS_SECURE_DIRECTORY_MIN_VERSION
-    )
-
-
-def _remove_private_probe_root(root: Path) -> bool:
-    def make_removable(function, path, _error):
-        try:
-            os.chmod(path, 0o700)
-            function(path)
-        except Exception:
-            pass
-
-    for _attempt in range(2):
-        try:
-            shutil.rmtree(root, onerror=make_removable)
-        except Exception:
-            pass
-        try:
-            if not root.exists():
-                return True
-        except Exception:
-            pass
-    return False
-
-
-def _private_probe_environment(
-    copied: Mapping[str, str], private_root: Path
-) -> dict[str, str]:
-    environment = dict(copied)
-    home = str(private_root / "home")
-    temporary = str(private_root / "tmp")
-    environment["HOME"] = home
-    if os.name == "nt":
-        environment["USERPROFILE"] = home
-    environment.update({"TEMP": temporary, "TMP": temporary, "TMPDIR": temporary})
-    return environment
-
-
-def _read_bounded_pipe(
-    pipe: BinaryIO,
-    buffer: bytearray,
-    overflow: threading.Event,
-    failed: threading.Event,
-    stop: threading.Event,
-    eof: threading.Event,
-    deadline: float,
-) -> None:
-    drain_deadline: float | None = None
-    try:
-        descriptor = pipe.fileno()
-        os.set_blocking(descriptor, False)
-        while True:
-            try:
-                chunk = os.read(descriptor, 8192)
-            except BlockingIOError:
-                if not stop.is_set():
-                    stop.wait(0.01)
-                    continue
-                now = time.monotonic()
-                if drain_deadline is None:
-                    drain_deadline = min(
-                        deadline,
-                        now + _PROBE_PIPE_DRAIN_SECONDS,
-                    )
-                if now >= drain_deadline:
-                    return
-                time.sleep(min(0.005, drain_deadline - now))
-                continue
-            if not chunk:
-                eof.set()
-                return
-            remaining = (_PROBE_PIPE_LIMIT + 1) - len(buffer)
-            if remaining > 0:
-                buffer.extend(chunk[:remaining])
-            if len(buffer) > _PROBE_PIPE_LIMIT:
-                overflow.set()
-    except Exception:
-        failed.set()
-
-
-def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
-    for pipe in (process.stdout, process.stderr):
-        if pipe is not None:
-            try:
-                pipe.close()
-            except Exception:
-                pass
-
-
-def _terminate_and_reap(process: subprocess.Popen[bytes], deadline: float) -> bool:
-    if _process_is_running(process):
-        try:
-            process.terminate()
-        except Exception:
-            pass
-        remaining = max(0.0, deadline - time.monotonic())
-        try:
-            process.wait(
-                timeout=min(
-                    _PROBE_TERMINATE_GRACE_SECONDS,
-                    remaining / 2,
-                )
-            )
-            return True
-        except Exception:
-            pass
-    try:
-        if process.poll() is None:
-            process.kill()
-    except Exception:
-        try:
-            process.kill()
-        except Exception:
-            pass
-    try:
-        process.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except Exception:
-        pass
-    return not _process_is_running(process)
-
-
-def _process_is_running(process: subprocess.Popen[bytes]) -> bool:
-    try:
-        return process.poll() is None
-    except Exception:
-        return True
-
-
-def _join_readers(readers: list[threading.Thread], deadline: float) -> None:
-    for reader in readers:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        reader.join(remaining)
 
 
 def _reject_duplicate_json_keys(pairs):
@@ -918,34 +588,14 @@ def _probe_environment(
     *,
     windows: bool | None = None,
 ) -> dict[str, str]:
-    selected = os.environ if source is None else source
-    case_insensitive = os.name == "nt" if windows is None else windows
-    allowed = PROFILE_PROBE_ENV_KEYS
-    if not case_insensitive:
-        allowed = allowed - _PROFILE_WINDOWS_ENV_KEYS
-
-    environment: dict[str, str] = {}
-    seen: set[str] = set()
-    for raw_key, value in selected.items():
-        if not isinstance(raw_key, str) or not isinstance(value, str):
-            continue
-        canonical_key = raw_key.upper() if case_insensitive else raw_key
-        if canonical_key not in allowed:
-            continue
-        if canonical_key in seen:
-            raise ValueError("invalid profile probe environment")
-        seen.add(canonical_key)
-        if "\0" in value:
-            continue
-        if canonical_key == "SOURCE_DATE_EPOCH" and not (
-            value
-            and len(value) <= _SOURCE_DATE_EPOCH_MAX_DIGITS
-            and value.isascii()
-            and value.isdigit()
-        ):
-            continue
-        environment[canonical_key] = value
-    return environment
+    try:
+        return probe_transport.sanitize_probe_environment(
+            probe_transport.PROFILE_PROBE_POLICY,
+            source,
+            windows=windows,
+        )
+    except ValueError:
+        raise ValueError("invalid profile probe environment") from None
 
 
 def _current_python_version() -> tuple[int, int, int]:

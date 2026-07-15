@@ -34,6 +34,7 @@ test = [
 where = ["."]
 include = [
   "algo*",
+  "hushine_runtime_import_probe*",
   "hushine_strategy*",
   "market_data*",
   "strategy_service*",

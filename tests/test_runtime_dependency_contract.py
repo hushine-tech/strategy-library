@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
+import tomllib
 
 import pytest
 
@@ -31,6 +32,13 @@ INITIAL_MANIFEST = (
 ).read_bytes()
 SCRIPT = Path(__file__).parents[1] / "scripts" / "check_runtime_dependency_contract.py"
 ORIGINAL_RUN_UV_LOCK_CHECK = checker._run_uv_lock_check
+
+
+def test_internal_import_probe_package_is_explicitly_wheel_packaged():
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+
+    includes = project["tool"]["setuptools"]["packages"]["find"]["include"]
+    assert "hushine_runtime_import_probe*" in includes
 
 
 @pytest.fixture(autouse=True)

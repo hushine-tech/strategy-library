@@ -14,6 +14,7 @@ import tomllib
 
 import pytest
 
+import hushine_runtime_import_probe.transport as probe_transport
 import hushine_strategy
 import hushine_strategy.runtime_dependencies as runtime_dependencies
 from hushine_strategy.runtime_dependencies import (
@@ -22,7 +23,6 @@ from hushine_strategy.runtime_dependencies import (
     probe_runtime_dependency_profile,
     require_runtime_dependency_profile,
 )
-
 
 _VALID_FIXTURE = """\
 schema_version = 1
@@ -53,16 +53,14 @@ def _append_dependency(
     probe: str,
     public: bool = True,
 ) -> str:
-    return (
-        text
-        + f"""
+    dependency = f"""
 [[dependencies]]
 import_root = "{import_root}"
 distribution = "{distribution}"
 probe = "{probe}"
 public = {str(public).lower()}
 """
-    )
+    return text + dependency
 
 
 def installed_probe_result(
@@ -148,7 +146,7 @@ def install_helper_popen(monkeypatch, helper_source: str):
         call["process"] = process
         return process
 
-    monkeypatch.setattr(runtime_dependencies.subprocess, "Popen", helper_popen)
+    monkeypatch.setattr(probe_transport.subprocess, "Popen", helper_popen)
     return calls
 
 
@@ -798,7 +796,7 @@ def test_source_date_epoch_accepts_twenty_ascii_digits():
 
 def test_installed_probe_uses_popen_not_subprocess_run(monkeypatch):
     monkeypatch.setattr(
-        runtime_dependencies.subprocess,
+        probe_transport.subprocess,
         "run",
         lambda *_args, **_kwargs: pytest.fail("subprocess.run must not be used"),
     )
@@ -943,7 +941,7 @@ def test_runner_rejects_noncanonical_or_oversized_invocation_before_launch(
     monkeypatch, executable
 ):
     monkeypatch.setattr(
-        runtime_dependencies.subprocess,
+        probe_transport.subprocess,
         "Popen",
         lambda *_args, **_kwargs: pytest.fail("invalid invocation was launched"),
     )
@@ -957,19 +955,19 @@ def test_runner_rejects_noncanonical_or_oversized_invocation_before_launch(
 def test_probe_argv_limit_is_measured_in_utf8_bytes_at_exact_boundary():
     fixed = ["-I", "-m", "probe", "_probe-installed", "--json"]
     fixed_size = sum(len(item.encode("utf-8")) + 1 for item in fixed)
-    executable_bytes = runtime_dependencies._PROBE_ARGV_LIMIT - fixed_size - 1
+    executable_bytes = probe_transport.PROBE_ARGV_LIMIT - fixed_size - 1
     executable = "/" + ("a" * (executable_bytes - 1))
 
-    assert runtime_dependencies._valid_probe_argv([executable, *fixed]) is True
-    assert runtime_dependencies._valid_probe_argv([executable + "a", *fixed]) is False
+    assert probe_transport.valid_probe_argv([executable, *fixed]) is True
+    assert probe_transport.valid_probe_argv([executable + "a", *fixed]) is False
     unicode_executable = "/" + ("é" * ((executable_bytes - 1) // 2))
-    assert runtime_dependencies._valid_probe_argv([unicode_executable, *fixed]) is True
+    assert probe_transport.valid_probe_argv([unicode_executable, *fixed]) is True
 
 
 @pytest.mark.parametrize("constraint", ["3.12", ">=3.11", "", 313])
 def test_runner_rejects_unknown_constraint_before_launch(monkeypatch, constraint):
     monkeypatch.setattr(
-        runtime_dependencies.subprocess,
+        probe_transport.subprocess,
         "Popen",
         lambda *_args, **_kwargs: pytest.fail("invalid constraint was launched"),
     )
@@ -1138,8 +1136,8 @@ def test_runner_times_out_terminates_reaps_joins_and_removes_root(monkeypatch):
         monkeypatch,
         "import time\ntime.sleep(60)\n",
     )
-    monkeypatch.setattr(runtime_dependencies, "_PROBE_TIMEOUT_SECONDS", 0.2)
-    monkeypatch.setattr(runtime_dependencies, "_PROBE_TERMINATE_GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(probe_transport, "PROFILE_PROBE_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(probe_transport, "PROBE_TERMINATE_GRACE_SECONDS", 0.1)
     started = time.monotonic()
 
     with pytest.raises(RuntimeError, match="target dependency probe timed out"):
@@ -1164,8 +1162,8 @@ def test_runner_escalates_from_ignored_terminate_to_kill(monkeypatch):
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "time.sleep(60)\n",
     )
-    monkeypatch.setattr(runtime_dependencies, "_PROBE_TIMEOUT_SECONDS", 0.4)
-    monkeypatch.setattr(runtime_dependencies, "_PROBE_TERMINATE_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(probe_transport, "PROFILE_PROBE_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(probe_transport, "PROBE_TERMINATE_GRACE_SECONDS", 0.2)
 
     with pytest.raises(RuntimeError, match="target dependency probe timed out"):
         runtime_dependencies._run_installed_probe(
@@ -1190,7 +1188,7 @@ def test_runner_cleans_up_when_second_reader_cannot_start(monkeypatch):
         return real_start(thread)
 
     monkeypatch.setattr(threading.Thread, "start", guarded_start)
-    monkeypatch.setattr(runtime_dependencies, "_PROBE_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(probe_transport, "PROFILE_PROBE_TIMEOUT_SECONDS", 1.0)
 
     with pytest.raises(
         RuntimeError, match="target dependency probe returned an invalid response"
@@ -1217,8 +1215,8 @@ def test_runner_cleans_up_when_reader_reports_failure(monkeypatch):
     def failed_reader(_pipe, _buffer, _overflow, failed, _stop, _eof, _deadline):
         failed.set()
 
-    monkeypatch.setattr(runtime_dependencies, "_read_bounded_pipe", failed_reader)
-    monkeypatch.setattr(runtime_dependencies, "_PROBE_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(probe_transport, "_read_bounded_pipe", failed_reader)
+    monkeypatch.setattr(probe_transport, "PROFILE_PROBE_TIMEOUT_SECONDS", 1.0)
 
     with pytest.raises(
         RuntimeError, match="target dependency probe returned an invalid response"
@@ -1243,8 +1241,8 @@ def test_runner_deadline_survives_descendant_holding_both_pipes(monkeypatch, tmp
         f"pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))\n"
         f"os.write(1, {payload!r})\n",
     )
-    monkeypatch.setattr(runtime_dependencies, "_PROBE_TIMEOUT_SECONDS", 0.3)
-    monkeypatch.setattr(runtime_dependencies, "_PROBE_TERMINATE_GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(probe_transport, "PROFILE_PROBE_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(probe_transport, "PROBE_TERMINATE_GRACE_SECONDS", 0.1)
     started = time.monotonic()
 
     try:
@@ -1298,8 +1296,8 @@ def test_runner_caps_both_pipes_and_reaps_on_overflow(monkeypatch):
         "b = threading.Thread(target=lambda: os.write(2, b'y' * 70000))\n"
         "a.start(); b.start(); a.join(); b.join(); time.sleep(60)\n",
     )
-    monkeypatch.setattr(runtime_dependencies, "_PROBE_TIMEOUT_SECONDS", 2.0)
-    monkeypatch.setattr(runtime_dependencies, "_PROBE_TERMINATE_GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(probe_transport, "PROFILE_PROBE_TIMEOUT_SECONDS", 2.0)
+    monkeypatch.setattr(probe_transport, "PROBE_TERMINATE_GRACE_SECONDS", 0.1)
 
     with pytest.raises(
         RuntimeError, match="target dependency probe output limit exceeded"
@@ -1320,7 +1318,7 @@ def test_runner_launch_failure_has_fixed_error_and_cleans_private_root(
     monkeypatch, tmp_path
 ):
     canary = "probe-launch-path-canary"
-    monkeypatch.setattr(runtime_dependencies.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(probe_transport.tempfile, "tempdir", str(tmp_path))
 
     with pytest.raises(RuntimeError) as caught:
         runtime_dependencies._run_installed_probe(
@@ -1348,7 +1346,7 @@ def test_private_directory_support_rejects_vulnerable_windows_python(
     platform_name, version, expected
 ):
     assert (
-        runtime_dependencies._secure_private_directories_supported(
+        probe_transport.secure_private_directories_supported(
             platform_name=platform_name,
             version_info=version,
         )
@@ -1358,13 +1356,13 @@ def test_private_directory_support_rejects_vulnerable_windows_python(
 
 def test_private_root_fails_before_creation_without_secure_windows_acl(monkeypatch):
     monkeypatch.setattr(
-        runtime_dependencies,
-        "_secure_private_directories_supported",
+        probe_transport,
+        "secure_private_directories_supported",
         lambda **_kwargs: False,
         raising=False,
     )
     monkeypatch.setattr(
-        runtime_dependencies.tempfile,
+        probe_transport.tempfile,
         "mkdtemp",
         lambda **_kwargs: pytest.fail("insecure directory was created"),
     )
@@ -1373,7 +1371,7 @@ def test_private_root_fails_before_creation_without_secure_windows_acl(monkeypat
         RuntimeError,
         match="secure private probe directories are unavailable",
     ):
-        runtime_dependencies._create_private_probe_root()
+        probe_transport.create_private_probe_root(probe_transport.PROFILE_PROBE_POLICY)
 
 
 def test_emit_json_writes_canonical_utf8_with_exact_lf(monkeypatch):
