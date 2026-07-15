@@ -827,6 +827,38 @@ def test_installed_probe_import_capture_never_uses_stringio(monkeypatch, tmp_pat
     assert runtime_dependencies._installed_probe_result(profile, ">=3.12")["ok"] is True
 
 
+def test_installed_probe_bounds_oversized_import_output_and_failure(
+    monkeypatch, tmp_path, capsys
+):
+    profile = load_runtime_dependency_profile(_write_fixture(tmp_path, _VALID_FIXTURE))
+    printed = "printed-import-canary-" * 5000
+    raised = "oversized-import-failure-" * 5000
+    monkeypatch.setattr(importlib.metadata, "version", lambda _distribution: "1.0")
+
+    def noisy_import(_probe):
+        print(printed)
+        raise RuntimeError(raised)
+
+    monkeypatch.setattr(importlib, "import_module", noisy_import)
+    monkeypatch.setattr(
+        io,
+        "StringIO",
+        lambda *_args, **_kwargs: pytest.fail("unbounded StringIO must not be used"),
+    )
+
+    result = runtime_dependencies._installed_probe_result(profile, ">=3.12")
+
+    captured = capsys.readouterr()
+    encoded = json.dumps(result)
+    assert captured.out == ""
+    assert captured.err == ""
+    assert printed not in encoded
+    assert result["ok"] is False
+    assert len(result["failures"]) == 1
+    assert len(result["failures"][0]["reason"]) <= 500
+    assert len(encoded.encode("utf-8")) < 2048
+
+
 def test_runner_resanitizes_environment_and_uses_private_directories(
     monkeypatch, tmp_path
 ):
@@ -1004,6 +1036,18 @@ def test_runner_rejects_noncanonical_or_inconsistent_protocol(
     assert error.__cause__ is None
     assert error.__suppress_context__ is True
     assert "canary" not in str(error)
+    assert calls[0]["process"].poll() is not None
+    assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
+
+
+def test_runner_converts_deep_json_recursion_to_fixed_protocol_error(monkeypatch):
+    nested = (b"[" * 30000) + (b"]" * 30000) + b"\n"
+
+    error, calls = _run_invalid_protocol(monkeypatch, nested)
+
+    assert str(error) == "target dependency probe returned an invalid response"
+    assert error.__cause__ is None
+    assert error.__suppress_context__ is True
     assert calls[0]["process"].poll() is not None
     assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
 
@@ -1288,6 +1332,48 @@ def test_runner_launch_failure_has_fixed_error_and_cleans_private_root(
     assert caught.value.__suppress_context__ is True
     assert canary not in str(caught.value)
     assert not list(tmp_path.glob("hushine-profile-probe-*"))
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "version", "expected"),
+    [
+        ("posix", (3, 12, 0), True),
+        ("nt", (3, 12, 0), False),
+        ("nt", (3, 12, 3), False),
+        ("nt", (3, 12, 4), True),
+        ("nt", (3, 13, 0), True),
+    ],
+)
+def test_private_directory_support_rejects_vulnerable_windows_python(
+    platform_name, version, expected
+):
+    assert (
+        runtime_dependencies._secure_private_directories_supported(
+            platform_name=platform_name,
+            version_info=version,
+        )
+        is expected
+    )
+
+
+def test_private_root_fails_before_creation_without_secure_windows_acl(monkeypatch):
+    monkeypatch.setattr(
+        runtime_dependencies,
+        "_secure_private_directories_supported",
+        lambda **_kwargs: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_dependencies.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: pytest.fail("insecure directory was created"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="secure private probe directories are unavailable",
+    ):
+        runtime_dependencies._create_private_probe_root()
 
 
 def test_emit_json_writes_canonical_utf8_with_exact_lf(monkeypatch):

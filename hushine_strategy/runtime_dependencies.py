@@ -83,6 +83,7 @@ _PROBE_TERMINATE_GRACE_SECONDS = 1.0
 _PROBE_PIPE_DRAIN_SECONDS = 0.1
 _PROBE_ROOT_PREFIX = "hushine-profile-probe-"
 _PROBE_THREAD_PREFIX = "runtime-profile-probe-"
+_WINDOWS_SECURE_DIRECTORY_MIN_VERSION = (3, 12, 4)
 _PROBE_TOP_LEVEL_FIELDS = frozenset(
     {
         "schema_version",
@@ -570,6 +571,8 @@ def _valid_probe_argv(command: list[str]) -> bool:
 
 
 def _create_private_probe_root() -> Path:
+    if not _secure_private_directories_supported():
+        raise RuntimeError("secure private probe directories are unavailable")
     root = Path(tempfile.mkdtemp(prefix=_PROBE_ROOT_PREFIX))
     try:
         if os.name != "nt":
@@ -583,6 +586,20 @@ def _create_private_probe_root() -> Path:
         _remove_private_probe_root(root)
         raise
     return root
+
+
+def _secure_private_directories_supported(
+    *,
+    platform_name: str | None = None,
+    version_info: tuple[int, int, int] | None = None,
+) -> bool:
+    selected_platform = os.name if platform_name is None else platform_name
+    selected_version = (
+        tuple(sys.version_info[:3]) if version_info is None else version_info
+    )
+    return selected_platform != "nt" or (
+        selected_version >= _WINDOWS_SECURE_DIRECTORY_MIN_VERSION
+    )
 
 
 def _remove_private_probe_root(root: Path) -> bool:
@@ -752,7 +769,7 @@ def _parse_probe_response(
             )
             + "\n"
         ).encode("utf-8")
-    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+    except Exception:
         return None
     try:
         valid_payload = _valid_probe_payload(result, returncode)
@@ -962,10 +979,14 @@ def _safe_exception_reason(error: BaseException) -> str:
             message = message.replace(value, "<redacted>")
     message = _PATH_PATTERN.sub("<path>", message)
     message = " ".join(message.split())
-    if len(message) > 500:
-        message = f"{message[:497]}..."
-    exception_name = type(error).__name__
-    return f"{exception_name}: {message}" if message else exception_name
+    exception_name = type(error).__name__[:128]
+    if not message:
+        return exception_name
+    prefix = f"{exception_name}: "
+    message_limit = 500 - len(prefix)
+    if len(message) > message_limit:
+        message = f"{message[: message_limit - 3]}..."
+    return f"{prefix}{message}"
 
 
 def _profile_json(profile: RuntimeDependencyProfile) -> dict[str, object]:
