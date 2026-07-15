@@ -1,3 +1,6 @@
+import os
+import types
+
 import pytest
 
 from hushine_strategy import Exchange, Market, OrderDecision, OrderSide, OrderType, PositionSide
@@ -204,6 +207,34 @@ class MyStrategy:
     ORDER_TARGETS = []
 
     def on_market_data(self, data, wallet):
+        return None
+"""
+
+
+SAFE_GETATTR_STRATEGY_CODE = """
+from hushine_strategy import Exchange, Market
+
+class MyStrategy:
+    INPUTS = [{"exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "symbol": "BTCUSDT", "interval": "1m"}]
+    ORDER_TARGETS = []
+
+    def on_market_data(self, data, wallet):
+        self.indicators = getattr(data, "indicators", None)
+        return None
+"""
+
+
+NUMPY_DECLARED_UNDERSCORE_STAR_STRATEGY_CODE = """
+from numpy import *
+from hushine_strategy import Exchange, Market
+
+class MyStrategy:
+    INPUTS = [{"exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "symbol": "BTCUSDT", "interval": "1m"}]
+    ORDER_TARGETS = []
+    NUMPY_VERSION = __version__
+
+    def on_market_data(self, data, wallet):
+        self.numpy_version = __version__
         return None
 """
 
@@ -570,6 +601,54 @@ def test_replay_executes_authorized_stdlib_and_third_party_star_imports(
         )
     )
     assert result.bars_processed == 0
+
+
+def test_replay_executes_normal_getattr_allowed_by_static_validation():
+    result = run_replay(
+        ReplayConfig(
+            strategy_code=SAFE_GETATTR_STRATEGY_CODE,
+            ticks=[_btcusdt_tick()],
+            wallet=FuturesWallet(initial_balance=1000.0),
+        )
+    )
+    assert result.bars_processed == 1
+
+
+def test_replay_star_import_keeps_safe_declared_leading_underscore_name():
+    result = run_replay(
+        ReplayConfig(
+            strategy_code=NUMPY_DECLARED_UNDERSCORE_STAR_STRATEGY_CODE,
+            ticks=[_btcusdt_tick()],
+            wallet=FuturesWallet(initial_balance=1000.0),
+        )
+    )
+    assert result.bars_processed == 1
+
+
+def test_safe_module_declared_all_filters_only_unsafe_internal_names():
+    module = types.ModuleType("requests.synthetic")
+    module.__all__ = (
+        "__version__",
+        "__builtins__",
+        "__dict__",
+        "_logical_name",
+        "_module",
+        "forbidden_module",
+        "safe_value",
+    )
+    module.__version__ = "1.2.3"
+    module.__builtins__ = {}
+    module._logical_name = "leak"
+    module._module = "leak"
+    module.forbidden_module = os
+    module.safe_value = 1
+    wrapped = _SafeModule(module, logical_name="requests.synthetic")
+
+    assert wrapped.__all__ == ("__version__", "safe_value")
+    assert wrapped.__version__ == "1.2.3"
+    for name in ("__builtins__", "__dict__", "_logical_name", "_module"):
+        with pytest.raises(AttributeError):
+            getattr(wrapped, name)
 
 
 def test_replay_star_import_wraps_registered_requests_runtime_alias():

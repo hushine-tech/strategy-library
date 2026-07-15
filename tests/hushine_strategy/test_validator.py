@@ -18,6 +18,54 @@ class MyStrategy:
 """
 
 
+REFLECTIVE_BUILTINS_BYPASSES = [
+    (
+        "import requests\n"
+        'getattr(requests, "__builtins__")["__import__"]("kafka")'
+    ),
+    (
+        "import requests\n"
+        'builtins_container = getattr(requests, "__builtins__")\n'
+        'loader = builtins_container["__import__"]\n'
+        'loader("kafka")'
+    ),
+    (
+        "import requests\n"
+        'getattr(requests, "__dict__").get("__builtins__").get('
+        '"__import__")("kafka")'
+    ),
+    (
+        "import requests\n"
+        'module_dict = getattr(requests, "__dict__")\n'
+        'builtins_container = module_dict.get("__builtins__")\n'
+        'loader = builtins_container.get("__import__")\n'
+        'loader("kafka")'
+    ),
+]
+NESTED_ASSIGNMENT_BYPASSES = [
+    '((loader,),) = ((__import__,),)\nloader("kafka")',
+    '(safe, (loader,)) = (len, (__import__,))\nloader("kafka")',
+    '([loader],) = [(__import__,)]\nloader("kafka")',
+    '(loader, safe) = (__import__,)\nloader("kafka")',
+]
+HANDLE_ACQUISITION_BYPASSES = [
+    'def run(loader=__import__): return loader("kafka")',
+    'def run(*, loader=__import__): return loader("kafka")',
+    'run = lambda loader=__import__: loader("kafka")',
+    '(lambda loader: loader("kafka"))(__import__)',
+    '[loader("kafka") for loader in [__import__]]',
+    'for loader in [__import__]: loader("kafka")',
+]
+SAFE_HANDLE_USES = [
+    "def run(loader=len): return loader([1])",
+    "def run(*, loader=len): return loader([1])",
+    "run = lambda loader=len: loader([1])",
+    "(lambda loader: loader([1]))(len)",
+    "[loader([1]) for loader in [len]]",
+    "for loader in [len]: loader([1])",
+]
+
+
 DYNAMIC_LOADING_CASES = [
     ('import importlib; importlib.import_module("kafka")', "forbidden_import"),
     ('from importlib import import_module as load; load("psycopg2")', "forbidden_import"),
@@ -27,6 +75,15 @@ DYNAMIC_LOADING_CASES = [
     ('getattr(__builtins__, "__import__")("kafka")', "forbidden_builtin_access"),
     ('vars(__builtins__)["__import__"]("kafka")', "forbidden_builtin_access"),
     ('globals()["__builtins__"]["__import__"]("kafka")', "forbidden_builtin_access"),
+] + [
+    (source, "forbidden_builtin_access")
+    for source in REFLECTIVE_BUILTINS_BYPASSES
+] + [
+    (source, "forbidden_call")
+    for source in NESTED_ASSIGNMENT_BYPASSES
+] + [
+    (source, "forbidden_call")
+    for source in HANDLE_ACQUISITION_BYPASSES
 ]
 
 PLATFORM_IMPORT_BYPASSES = [
@@ -225,6 +282,54 @@ def test_imported_builtins_containers_cannot_bypass_library_safety(source):
     assert "forbidden_builtin_access" in codes
     assert "forbidden_call" in codes
     assert "UNSUPPORTED_STRATEGY_DEPENDENCY" not in codes
+
+
+@pytest.mark.parametrize("source", REFLECTIVE_BUILTINS_BYPASSES)
+def test_reflective_builtins_containers_cannot_bypass_library_safety(source):
+    result = _validate_body(source)
+    assert {"forbidden_builtin_access", "forbidden_call"} <= {
+        issue.code for issue in result.issues
+    }
+    assert all(
+        issue.code != "UNSUPPORTED_STRATEGY_DEPENDENCY"
+        for issue in result.issues
+    )
+
+
+@pytest.mark.parametrize("source", NESTED_ASSIGNMENT_BYPASSES)
+def test_nested_assignment_forbidden_leaf_cannot_bypass_library_safety(source):
+    result = _validate_body(source)
+    assert any(
+        issue.code == "forbidden_call" and issue.symbol == "loader"
+        for issue in result.issues
+    )
+    assert all(
+        issue.code != "UNSUPPORTED_STRATEGY_DEPENDENCY"
+        for issue in result.issues
+    )
+
+
+def test_library_normal_nested_assignment_remains_valid():
+    result = _validate_body("((safe,),) = ((len,),)\nsafe([1])")
+    assert result.ok is True
+    assert result.issues == []
+
+
+@pytest.mark.parametrize("source", HANDLE_ACQUISITION_BYPASSES)
+def test_library_closed_callable_handle_acquisition_is_forbidden(source):
+    result = _validate_body(source)
+    assert any(issue.code == "forbidden_call" for issue in result.issues)
+    assert all(
+        issue.code != "UNSUPPORTED_STRATEGY_DEPENDENCY"
+        for issue in result.issues
+    )
+
+
+@pytest.mark.parametrize("source", SAFE_HANDLE_USES)
+def test_library_safe_defaults_and_arguments_remain_valid(source):
+    result = _validate_body(source)
+    assert result.ok is True
+    assert result.issues == []
 
 
 @pytest.mark.parametrize(

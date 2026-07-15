@@ -35,6 +35,66 @@ BUILTINS_IMPORT_ALIAS_BYPASSES = [
         'loader("kafka")'
     ),
 ]
+REFLECTIVE_BUILTINS_BYPASSES = [
+    (
+        "import requests\n"
+        'getattr(requests, "__builtins__")["__import__"]("kafka")'
+    ),
+    (
+        "import requests\n"
+        'builtins_container = getattr(requests, "__builtins__")\n'
+        'loader = builtins_container["__import__"]\n'
+        'loader("kafka")'
+    ),
+    (
+        "import requests\n"
+        'getattr(requests, "__dict__").get("__builtins__").get('
+        '"__import__")("kafka")'
+    ),
+    (
+        "import requests\n"
+        'module_dict = getattr(requests, "__dict__")\n'
+        'builtins_container = module_dict.get("__builtins__")\n'
+        'loader = builtins_container.get("__import__")\n'
+        'loader("kafka")'
+    ),
+]
+NESTED_ASSIGNMENT_BYPASSES = [
+    '((loader,),) = ((__import__,),)\nloader("kafka")',
+    '(safe, (loader,)) = (len, (__import__,))\nloader("kafka")',
+    '([loader],) = [(__import__,)]\nloader("kafka")',
+    '(loader, safe) = (__import__,)\nloader("kafka")',
+]
+HANDLE_ACQUISITION_BYPASSES = [
+    'def run(loader=__import__): return loader("kafka")',
+    'def run(*, loader=__import__): return loader("kafka")',
+    'run = lambda loader=__import__: loader("kafka")',
+    '(lambda loader: loader("kafka"))(__import__)',
+    '[loader("kafka") for loader in [__import__]]',
+    'for loader in [__import__]: loader("kafka")',
+]
+SAFE_HANDLE_USES = [
+    "def run(loader=len): return loader([1])",
+    "def run(*, loader=len): return loader([1])",
+    "run = lambda loader=len: loader([1])",
+    "(lambda loader: loader([1]))(len)",
+    "[loader([1]) for loader in [len]]",
+    "for loader in [len]: loader([1])",
+]
+
+
+def _reverse_forbidden_alias_chain(assignment_count: int) -> str:
+    lines = [
+        f"alias_{index} = alias_{index + 1}"
+        for index in range(assignment_count - 1)
+    ]
+    lines.extend(
+        [
+            f"alias_{assignment_count - 1} = __import__",
+            'alias_0("kafka")',
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _dependency_issues(
@@ -443,6 +503,18 @@ def test_dynamic_call_aliases_are_rejected_without_execution(source):
         ('getattr(__builtins__, "__import__")("kafka")', "forbidden_builtin_access"),
         ('vars(__builtins__)["__import__"]("kafka")', "forbidden_builtin_access"),
         ('globals()["__builtins__"]["__import__"]("kafka")', "forbidden_builtin_access"),
+    ]
+    + [
+        (source, "forbidden_builtin_access")
+        for source in REFLECTIVE_BUILTINS_BYPASSES
+    ]
+    + [
+        (source, "forbidden_call")
+        for source in NESTED_ASSIGNMENT_BYPASSES
+    ]
+    + [
+        (source, "forbidden_call")
+        for source in HANDLE_ACQUISITION_BYPASSES
     ],
 )
 def test_dynamic_loading_matrix_has_expected_safety_category(source, expected_code):
@@ -458,8 +530,150 @@ def test_literal_getattr_forbidden_symbol_is_rejected_but_normal_getattr_is_allo
     )
     assert {issue.code for issue in unsafe} == {"forbidden_call"}
     assert validate_dynamic_import_safety(
-        ast.parse('getattr(strategy, "indicators", None)')
+        ast.parse('getattr(data, "indicators", None)')
     ) == ()
+
+
+@pytest.mark.parametrize("source", REFLECTIVE_BUILTINS_BYPASSES)
+def test_literal_getattr_builtins_containers_propagate_to_dynamic_call(source):
+    issues = validate_dynamic_import_safety(ast.parse(source))
+    assert {"forbidden_builtin_access", "forbidden_call"} <= {
+        issue.code for issue in issues
+    }
+
+
+def test_reverse_alias_chain_uses_near_linear_origin_evaluations(monkeypatch):
+    assignment_count = 2_000
+    source = _reverse_forbidden_alias_chain(assignment_count)
+    original_forbidden_origin = import_validation._forbidden_origin
+    evaluation_count = 0
+
+    def counting_forbidden_origin(*args, **kwargs):
+        nonlocal evaluation_count
+        evaluation_count += 1
+        return original_forbidden_origin(*args, **kwargs)
+
+    monkeypatch.setattr(
+        import_validation,
+        "_forbidden_origin",
+        counting_forbidden_origin,
+    )
+    issues = validate_dynamic_import_safety(ast.parse(source))
+
+    assert any(
+        issue.code == "forbidden_call" and issue.symbol == "alias_0"
+        for issue in issues
+    )
+    assert evaluation_count <= 12 * assignment_count + 100
+
+
+def test_alias_cycle_terminates_and_propagates_forbidden_origin(monkeypatch):
+    source = (
+        "left = right\n"
+        "right = left\n"
+        "right = __import__\n"
+        'left("kafka")'
+    )
+    original_forbidden_origin = import_validation._forbidden_origin
+    evaluation_count = 0
+
+    def counting_forbidden_origin(*args, **kwargs):
+        nonlocal evaluation_count
+        evaluation_count += 1
+        return original_forbidden_origin(*args, **kwargs)
+
+    monkeypatch.setattr(
+        import_validation,
+        "_forbidden_origin",
+        counting_forbidden_origin,
+    )
+    issues = validate_dynamic_import_safety(ast.parse(source))
+
+    assert any(
+        issue.code == "forbidden_call" and issue.symbol == "left"
+        for issue in issues
+    )
+    assert evaluation_count <= 12 * 3 + 100
+
+
+def test_multiple_assignments_keep_first_deterministic_forbidden_origin():
+    source = (
+        "loader = eval\n"
+        "loader = exec\n"
+        "child = loader\n"
+        'child("payload")'
+    )
+    first = validate_dynamic_import_safety(ast.parse(source))
+    second = validate_dynamic_import_safety(ast.parse(source))
+
+    assert first == second
+    line_three_symbols = [
+        (issue.line, issue.symbol)
+        for issue in first
+        if issue.code == "forbidden_call" and issue.line == 3
+    ]
+    assert (3, "eval") in line_three_symbols
+    assert (3, "exec") not in line_three_symbols
+
+
+@pytest.mark.parametrize("source", NESTED_ASSIGNMENT_BYPASSES)
+def test_nested_assignment_forbidden_leaf_is_never_dropped(source):
+    issues = validate_dynamic_import_safety(ast.parse(source))
+    assert any(
+        issue.code == "forbidden_call" and issue.symbol == "loader"
+        for issue in issues
+    )
+
+
+def test_matching_nested_assignment_only_propagates_corresponding_leaf():
+    issues = validate_dynamic_import_safety(
+        ast.parse(
+            "(safe, (loader,)) = (len, (__import__,))\n"
+            "safe([1])\n"
+            'loader("kafka")'
+        )
+    )
+    assert not any(issue.symbol == "safe" for issue in issues)
+    assert any(
+        issue.code == "forbidden_call" and issue.symbol == "loader"
+        for issue in issues
+    )
+
+
+def test_normal_nested_assignment_remains_valid():
+    assert validate_dynamic_import_safety(
+        ast.parse("((safe,),) = ((len,),)\nsafe([1])")
+    ) == ()
+
+
+@pytest.mark.parametrize("source", HANDLE_ACQUISITION_BYPASSES)
+def test_closed_callable_handle_acquisition_is_forbidden(source):
+    issues = validate_dynamic_import_safety(ast.parse(source))
+    assert any(issue.code == "forbidden_call" for issue in issues)
+
+
+@pytest.mark.parametrize("source", SAFE_HANDLE_USES)
+def test_ordinary_safe_defaults_and_arguments_remain_valid(source):
+    assert validate_dynamic_import_safety(ast.parse(source)) == ()
+
+
+def test_known_forbidden_alias_load_as_argument_is_forbidden():
+    issues = validate_dynamic_import_safety(
+        ast.parse("loader = __import__\nconsume(loader)")
+    )
+    assert any(
+        issue.code == "forbidden_call" and issue.symbol == "loader"
+        for issue in issues
+    )
+
+
+def test_direct_closed_call_deduplicates_name_load_and_call_issue():
+    issues = validate_dynamic_import_safety(ast.parse('__import__("kafka")'))
+    assert [
+        issue
+        for issue in issues
+        if issue.code == "forbidden_call" and issue.symbol == "__import__"
+    ] == [issues[0]]
 
 
 @pytest.mark.parametrize("source", BUILTINS_IMPORT_ALIAS_BYPASSES)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from collections import deque
 from dataclasses import dataclass
 from importlib.machinery import BuiltinImporter, FrozenImporter, PathFinder
 from typing import AbstractSet
@@ -145,6 +146,17 @@ def _root(module: str) -> str:
 def _subscript_key(node: ast.expr) -> str:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    return ""
+
+
+def _literal_getattr_symbol(node: ast.AST) -> str:
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+    ):
+        return _subscript_key(node.args[1])
     return ""
 
 
@@ -358,12 +370,13 @@ def _assignment_pairs(
         and len(target.elts) == len(value.elts)
     ):
         return tuple(
-            (_assignment_target_names(target_item), value_item)
+            pair
             for target_item, value_item in zip(
                 target.elts,
                 value.elts,
                 strict=True,
             )
+            for pair in _assignment_pairs(target_item, value_item)
         )
     return ((_assignment_target_names(target), value),)
 
@@ -392,10 +405,23 @@ def _iter_assignments(
     return tuple(assignments)
 
 
+def _assignment_dependency_names(value: ast.expr) -> frozenset[str]:
+    return frozenset(
+        node.id
+        for node in ast.walk(value)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    )
+
+
 def _is_builtins_container(
     node: ast.expr,
     builtins_aliases: AbstractSet[str],
 ) -> bool:
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return any(
+            _is_builtins_container(child, builtins_aliases)
+            for child in node.elts
+        )
     if isinstance(node, ast.Name):
         return node.id == "__builtins__" or node.id in builtins_aliases
     if isinstance(node, ast.Attribute):
@@ -407,6 +433,8 @@ def _is_builtins_container(
         )
     if isinstance(node, ast.Subscript):
         return _subscript_key(node.slice) == "__builtins__"
+    if _literal_getattr_symbol(node) in {"__builtins__", "__dict__"}:
+        return True
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -469,6 +497,17 @@ def _forbidden_origin(
     builtins_aliases: AbstractSet[str],
     forbidden_calls: AbstractSet[str],
 ) -> tuple[str, str] | None:
+    if isinstance(node, (ast.Tuple, ast.List)):
+        for child in node.elts:
+            origin = _forbidden_origin(
+                child,
+                forbidden_aliases,
+                builtins_aliases,
+                forbidden_calls,
+            )
+            if origin is not None:
+                return origin
+        return None
     if isinstance(node, ast.NamedExpr):
         return _forbidden_origin(
             node.value,
@@ -495,6 +534,51 @@ def _forbidden_origin(
     return None
 
 
+def _propagate_assignment_aliases(
+    assignments: tuple[tuple[tuple[str, ...], ast.expr, int], ...],
+    *,
+    forbidden_aliases: dict[str, tuple[str, str]],
+    builtins_aliases: set[str],
+    forbidden_calls: AbstractSet[str],
+) -> None:
+    reverse_dependencies: dict[str, list[int]] = {}
+    for index, (_, value, _) in enumerate(assignments):
+        for dependency in _assignment_dependency_names(value):
+            reverse_dependencies.setdefault(dependency, []).append(index)
+
+    worklist = deque(range(len(assignments)))
+    queued = set(range(len(assignments)))
+    while worklist:
+        index = worklist.popleft()
+        queued.remove(index)
+        names, value, _ = assignments[index]
+        changed_names: set[str] = set()
+
+        if _is_builtins_container(value, builtins_aliases):
+            for name in names:
+                if name not in builtins_aliases:
+                    builtins_aliases.add(name)
+                    changed_names.add(name)
+
+        origin = _forbidden_origin(
+            value,
+            forbidden_aliases,
+            builtins_aliases,
+            forbidden_calls,
+        )
+        if origin is not None:
+            for name in names:
+                if name not in forbidden_aliases:
+                    forbidden_aliases[name] = origin
+                    changed_names.add(name)
+
+        for name in sorted(changed_names):
+            for dependent in reverse_dependencies.get(name, ()):
+                if dependent not in queued:
+                    worklist.append(dependent)
+                    queued.add(dependent)
+
+
 def _explicit_builtins_symbol(
     node: ast.AST,
     builtins_aliases: AbstractSet[str],
@@ -513,6 +597,9 @@ def _explicit_builtins_symbol(
         and _subscript_key(node.slice) == "__builtins__"
     ):
         return "__builtins__"
+    reflected_symbol = _literal_getattr_symbol(node)
+    if reflected_symbol in {"__builtins__", "__dict__"}:
+        return reflected_symbol
     return ""
 
 
@@ -548,32 +635,17 @@ def validate_dynamic_import_safety(
                         )
                     )
                 if alias.name in closed_calls:
-                    forbidden_aliases[alias.asname or alias.name] = (
-                        module,
-                        alias.name,
+                    forbidden_aliases.setdefault(
+                        alias.asname or alias.name,
+                        (module, alias.name),
                     )
 
-    for _ in range(len(assignments) + 1):
-        changed = False
-        for names, value, _ in assignments:
-            if _is_builtins_container(value, builtins_aliases):
-                for name in names:
-                    if name not in builtins_aliases:
-                        builtins_aliases.add(name)
-                        changed = True
-            origin = _forbidden_origin(
-                value,
-                forbidden_aliases,
-                builtins_aliases,
-                closed_calls,
-            )
-            if origin is not None:
-                for name in names:
-                    if forbidden_aliases.get(name) != origin:
-                        forbidden_aliases[name] = origin
-                        changed = True
-        if not changed:
-            break
+    _propagate_assignment_aliases(
+        assignments,
+        forbidden_aliases=forbidden_aliases,
+        builtins_aliases=builtins_aliases,
+        forbidden_calls=closed_calls,
+    )
 
     issues: list[DynamicImportSafetyIssue] = list(imported_builtins_accesses)
     for _, value, line in assignments:
@@ -610,6 +682,28 @@ def validate_dynamic_import_safety(
                     ),
                 )
             )
+
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            origin = _forbidden_origin(
+                node,
+                forbidden_aliases,
+                builtins_aliases,
+                closed_calls,
+            )
+            if origin is not None:
+                module, _ = origin
+                issues.append(
+                    DynamicImportSafetyIssue(
+                        code="forbidden_call",
+                        module=module,
+                        symbol=node.id,
+                        line=_line(node),
+                        message=(
+                            f"acquiring callable {node.id} is not allowed "
+                            "in strategy code"
+                        ),
+                    )
+                )
 
         if isinstance(node, ast.Import):
             for alias in node.names:

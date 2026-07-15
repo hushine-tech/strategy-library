@@ -13,6 +13,11 @@ from hushine_strategy.validator import ALLOWED_IMPORT_ROOTS, FORBIDDEN_IMPORT_RO
 from hushine_strategy.wallet.futures import FuturesWallet
 
 
+_BLOCKED_SAFE_MODULE_NAMES = frozenset(
+    {"__builtins__", "__dict__", "_logical_name", "_module"}
+)
+
+
 def _root(name: str) -> str:
     return str(name).split(".", 1)[0]
 
@@ -65,15 +70,21 @@ def _safe_star_names(
     try:
         declared_names = getattr(module, "__all__")
     except AttributeError:
+        has_declared_names = False
         candidate_names = sorted(
             name for name in vars(module) if not name.startswith("_")
         )
     else:
+        has_declared_names = True
         candidate_names = tuple(declared_names)
 
     safe_names: list[str] = []
     for name in candidate_names:
-        if not isinstance(name, str) or name.startswith("_"):
+        if (
+            not isinstance(name, str)
+            or name in _BLOCKED_SAFE_MODULE_NAMES
+            or (not has_declared_names and name.startswith("_"))
+        ):
             continue
         try:
             value = getattr(module, name)
@@ -107,10 +118,15 @@ class _SafeModule:
             module = object.__getattribute__(self, "_module")
             logical_name = object.__getattribute__(self, "_logical_name")
             return _safe_star_names(module, logical_name)
-        if name.startswith("_") or name in {"__builtins__", "__dict__"}:
+        if name in _BLOCKED_SAFE_MODULE_NAMES:
             raise AttributeError(f"module attribute {name} is not available in replay strategy code")
         module = object.__getattribute__(self, "_module")
         logical_name = object.__getattribute__(self, "_logical_name")
+        if (
+            name.startswith("_")
+            and name not in _safe_star_names(module, logical_name)
+        ):
+            raise AttributeError(f"module attribute {name} is not available in replay strategy code")
         child_logical_name = f"{logical_name}.{name}"
         try:
             value = getattr(module, name)
@@ -169,6 +185,7 @@ _SAFE_BUILTINS = {
     "dict": dict,
     "enumerate": enumerate,
     "float": float,
+    "getattr": getattr,
     "int": int,
     "isinstance": isinstance,
     "len": len,
