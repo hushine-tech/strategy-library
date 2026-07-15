@@ -39,6 +39,106 @@ decode_import_response = protocol.decode_import_response
 encode_import_request = protocol.encode_import_request
 
 
+def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class _FakeWindowsKernel32:
+    def __init__(
+        self,
+        *,
+        create_result: int = 101,
+        configure_result: int = 1,
+        assign_result: int = 1,
+        close_result: int = 1,
+        snapshot_result: int = 202,
+        first_thread_result: int = 1,
+        thread_owner_pid: int = 404,
+        thread_id: int = 505,
+        open_thread_result: int = 606,
+        resume_result: int = 1,
+        terminate_result: int = 1,
+    ):
+        self.create_result = create_result
+        self.configure_result = configure_result
+        self.assign_result = assign_result
+        self.close_result = close_result
+        self.snapshot_result = snapshot_result
+        self.first_thread_result = first_thread_result
+        self.thread_owner_pid = thread_owner_pid
+        self.thread_id = thread_id
+        self.open_thread_result = open_thread_result
+        self.resume_result = resume_result
+        self.terminate_result = terminate_result
+        self.calls = []
+
+    def CreateJobObjectW(self, security, name):
+        self.calls.append(("create", security, name))
+        return self.create_result
+
+    def SetInformationJobObject(self, handle, info_class, raw_info, size):
+        self.calls.append(
+            (
+                "configure",
+                handle,
+                info_class,
+                raw_info._obj.BasicLimitInformation.LimitFlags,
+                size,
+            )
+        )
+        return self.configure_result
+
+    def AssignProcessToJobObject(self, handle, process_handle):
+        self.calls.append(("assign", handle, process_handle))
+        return self.assign_result
+
+    def CreateToolhelp32Snapshot(self, flags, process_id):
+        self.calls.append(("snapshot", flags, process_id))
+        return self.snapshot_result
+
+    def Thread32First(self, snapshot, raw_entry):
+        self.calls.append(("thread-first", snapshot))
+        if self.first_thread_result:
+            raw_entry._obj.th32OwnerProcessID = self.thread_owner_pid
+            raw_entry._obj.th32ThreadID = self.thread_id
+        return self.first_thread_result
+
+    def Thread32Next(self, snapshot, _raw_entry):
+        self.calls.append(("thread-next", snapshot))
+        return 0
+
+    def OpenThread(self, access, inherit, thread_id):
+        self.calls.append(("thread-open", access, inherit, thread_id))
+        return self.open_thread_result
+
+    def ResumeThread(self, handle):
+        self.calls.append(("thread-resume", handle))
+        return self.resume_result
+
+    def TerminateJobObject(self, handle, exit_code):
+        self.calls.append(("terminate-job", handle, exit_code))
+        return self.terminate_result
+
+    def CloseHandle(self, handle):
+        self.calls.append(("close", handle))
+        return self.close_result
+
+
 def _import(module: str = "numpy", *, line: int = 1, column: int = 0) -> ImportRecord:
     return ImportRecord(
         kind="import",
@@ -454,108 +554,197 @@ class TestRequestProtocol:
             )
 
     @pytest.mark.parametrize(
-        "record",
+        ("kind", "names"),
         [
-            ImportRecord("import", "numpy", [], 1, 0),
-            ImportRecord(
-                "from",
-                "requests",
-                [protocol.ImportName("get", None)],
-                1,
-                0,
-            ),
+            ("import", []),
+            ("from", [protocol.ImportName("get", None)]),
+            ("from", None),
         ],
     )
-    def test_public_codec_rejects_non_tuple_names_before_transport(
-        self, monkeypatch, record
-    ):
-        monkeypatch.setattr(
-            protocol,
-            "run_probe",
-            lambda *_args, **_kwargs: pytest.fail("mutable names reached transport"),
-        )
-
-        with pytest.raises(ImportProbeProtocolError, match="invalid import request"):
-            encode_import_request(expected_profile=EXPECTED_PROFILE, imports=(record,))
-        with pytest.raises(ImportProbeProtocolError, match="invalid import request"):
-            probe_import_records(
-                (record,),
-                python_invocation_path=PYTHON,
-                expected_profile=EXPECTED_PROFILE,
-            )
+    def test_import_record_rejects_mutable_names_at_construction(self, kind, names):
+        with pytest.raises(ValueError, match=r"^invalid import record$"):
+            ImportRecord(kind, "requests", names, 1, 0)
 
     def test_public_codec_rejects_nonexact_import_name(self):
         class DerivedImportName(protocol.ImportName):
             pass
 
-        record = ImportRecord(
-            "from",
-            "requests",
-            (DerivedImportName("get", None),),
-            1,
-            0,
-        )
+        with pytest.raises(ValueError, match=r"^invalid import record$"):
+            ImportRecord(
+                "from",
+                "requests",
+                (DerivedImportName("get", None),),
+                1,
+                0,
+            )
 
-        with pytest.raises(ImportProbeProtocolError, match="invalid import request"):
-            encode_import_request(expected_profile=EXPECTED_PROFILE, imports=(record,))
-
-    def test_protocol_values_require_exact_primitive_strings(self):
+    def test_neutral_value_constructors_require_exact_fields_and_shapes(self):
         class DerivedStr(str):
             pass
 
-        profile = ExpectedProfile("profile", "1.0.0", "a" * 64)
-        record = ImportRecord("import", "numpy", (), 1, 0)
+        class DerivedTuple(tuple):
+            pass
+
         variants = (
             (
-                ExpectedProfile(
-                    DerivedStr(profile.name), profile.version, profile.contract_sha256
-                ),
-                record,
+                lambda: ExpectedProfile(DerivedStr("profile"), "1.0.0", "a" * 64),
+                "invalid expected profile",
             ),
             (
-                ExpectedProfile(
-                    profile.name, DerivedStr(profile.version), profile.contract_sha256
-                ),
-                record,
+                lambda: ExpectedProfile("profile", DerivedStr("1.0.0"), "a" * 64),
+                "invalid expected profile",
             ),
             (
-                ExpectedProfile(
-                    profile.name, profile.version, DerivedStr(profile.contract_sha256)
-                ),
-                record,
+                lambda: ExpectedProfile("profile", "1.0.0", DerivedStr("a" * 64)),
+                "invalid expected profile",
             ),
-            (profile, ImportRecord(DerivedStr("import"), "numpy", (), 1, 0)),
-            (profile, ImportRecord("import", DerivedStr("numpy"), (), 1, 0)),
             (
-                profile,
-                ImportRecord(
+                lambda: protocol.ImportName(DerivedStr("get"), None),
+                "invalid import name",
+            ),
+            (
+                lambda: protocol.ImportName("get", DerivedStr("fetch")),
+                "invalid import name",
+            ),
+            (
+                lambda: ImportRecord(DerivedStr("import"), "numpy", (), 1, 0),
+                "invalid import record",
+            ),
+            (
+                lambda: ImportRecord("import", DerivedStr("numpy"), (), 1, 0),
+                "invalid import record",
+            ),
+            (
+                lambda: ImportRecord(
                     "from",
                     "requests",
-                    (protocol.ImportName(DerivedStr("get"), None),),
+                    DerivedTuple((protocol.ImportName("get", None),)),
                     1,
                     0,
                 ),
+                "invalid import record",
             ),
             (
-                profile,
-                ImportRecord(
-                    "from",
-                    "requests",
-                    (protocol.ImportName("get", DerivedStr("fetch")),),
-                    1,
-                    0,
-                ),
+                lambda: ImportRecord("import", "numpy", (), True, 0),
+                "invalid import record",
+            ),
+            (
+                lambda: ImportRecord("import", "numpy", (), 1, False),
+                "invalid import record",
             ),
         )
 
-        for selected_profile, selected_record in variants:
+        for factory, message in variants:
+            with pytest.raises(ValueError, match=rf"^{message}$"):
+                factory()
+
+    @pytest.mark.parametrize(
+        ("factory", "message"),
+        [
+            (
+                lambda: ExpectedProfile("", "1.0.0", "a" * 64),
+                "invalid expected profile",
+            ),
+            (
+                lambda: ExpectedProfile("profile", "", "a" * 64),
+                "invalid expected profile",
+            ),
+            (
+                lambda: ExpectedProfile("profile", "1.0.0", "A" * 64),
+                "invalid expected profile",
+            ),
+            (lambda: protocol.ImportName("", None), "invalid import name"),
+            (lambda: protocol.ImportName("*", "alias"), "invalid import name"),
+            (
+                lambda: ImportRecord(
+                    "import", "numpy", (protocol.ImportName("x", None),), 1, 0
+                ),
+                "invalid import record",
+            ),
+            (
+                lambda: ImportRecord("from", "requests", (), 1, 0),
+                "invalid import record",
+            ),
+            (
+                lambda: ImportRecord("unknown", "numpy", (), 1, 0),
+                "invalid import record",
+            ),
+        ],
+    )
+    def test_neutral_value_constructors_reject_invalid_semantics(
+        self, factory, message
+    ):
+        with pytest.raises(ValueError, match=rf"^{message}$"):
+            factory()
+
+    def test_private_codec_accepts_profile_mapping_but_public_clients_reject_it(
+        self, monkeypatch, tmp_path
+    ):
+        raw_profile = {
+            "name": EXPECTED_PROFILE.name,
+            "version": EXPECTED_PROFILE.version,
+            "contract_sha256": EXPECTED_PROFILE.contract_sha256,
+        }
+        encoded = encode_import_request(expected_profile=raw_profile, imports=())
+        assert decode_import_request(encoded)["expected_profile"] == raw_profile
+        monkeypatch.setattr(
+            protocol,
+            "run_probe",
+            lambda *_args, **_kwargs: pytest.fail("raw profile reached transport"),
+        )
+
+        for client in (
+            lambda: probe_import_records(
+                (),
+                python_invocation_path=PYTHON,
+                expected_profile=raw_profile,
+            ),
+            lambda: protocol._probe_import_records_for_test(
+                (),
+                python_invocation_path=PYTHON,
+                expected_profile=raw_profile,
+                extra_python_path=(str(tmp_path),),
+            ),
+        ):
             with pytest.raises(
-                ImportProbeProtocolError, match="invalid import request"
+                ImportProbeProtocolError, match=r"^invalid import request$"
             ):
-                encode_import_request(
-                    expected_profile=selected_profile,
-                    imports=(selected_record,),
-                )
+                client()
+
+    def test_public_clients_reject_expected_profile_subclasses(
+        self, monkeypatch, tmp_path
+    ):
+        class DerivedProfile(ExpectedProfile):
+            pass
+
+        derived = DerivedProfile(
+            EXPECTED_PROFILE.name,
+            EXPECTED_PROFILE.version,
+            EXPECTED_PROFILE.contract_sha256,
+        )
+        monkeypatch.setattr(
+            protocol,
+            "run_probe",
+            lambda *_args, **_kwargs: pytest.fail("profile subclass reached transport"),
+        )
+
+        for client in (
+            lambda: probe_import_records(
+                (),
+                python_invocation_path=PYTHON,
+                expected_profile=derived,
+            ),
+            lambda: protocol._probe_import_records_for_test(
+                (),
+                python_invocation_path=PYTHON,
+                expected_profile=derived,
+                extra_python_path=(str(tmp_path),),
+            ),
+        ):
+            with pytest.raises(
+                ImportProbeProtocolError, match=r"^invalid import request$"
+            ):
+                client()
 
     def test_canonical_request_has_exact_shapes_ascii_and_one_lf(self, tmp_path):
         imports = (
@@ -998,6 +1187,39 @@ class TestTransportPolicies:
                 windows=True,
             )
 
+    def test_environment_policy_ignores_string_subclasses_without_calling_overrides(
+        self,
+    ):
+        class ReclassifiedKey(str):
+            def upper(self):
+                return "LANG"
+
+        class DerivedValue(str):
+            pass
+
+        assert transport.sanitize_probe_environment(
+            transport.IMPORT_PROBE_POLICY,
+            {
+                ReclassifiedKey("AUTH_TOKEN"): "secret-canary",
+                "LANG": DerivedValue("malicious-locale"),
+                "LC_ALL": "C.UTF-8",
+            },
+            windows=True,
+        ) == {"LC_ALL": "C.UTF-8"}
+
+    def test_argv_rejects_string_subclasses_before_overridable_encoding(self):
+        class UnderreportedArg(str):
+            def encode(self, *_args, **_kwargs):
+                return b"x"
+
+        assert (
+            transport.valid_probe_argv(
+                [PYTHON, UnderreportedArg("x" * transport.PROBE_ARGV_LIMIT)]
+            )
+            is False
+        )
+        assert transport.valid_probe_argv([UnderreportedArg(PYTHON), "-I"]) is False
+
     def test_unknown_or_union_environment_policy_is_rejected_before_launch(
         self, monkeypatch
     ):
@@ -1144,6 +1366,198 @@ class TestTransportLifecycle:
         assert environment["TMPDIR"] == str(private_root / "tmp")
         assert not private_root.exists()
 
+    def test_process_creation_options_are_portable_and_containing(self):
+        assert transport._process_containment_popen_kwargs("posix") == {
+            "start_new_session": True
+        }
+        assert transport._process_containment_popen_kwargs("nt") == {
+            "creationflags": transport._WINDOWS_CREATE_NEW_PROCESS_GROUP
+            | transport._WINDOWS_CREATE_SUSPENDED
+        }
+
+    def test_windows_job_object_is_configured_assigned_and_closed_portably(self):
+        kernel32 = _FakeWindowsKernel32()
+
+        handle = transport._create_windows_job_object(303, kernel32=kernel32)
+
+        assert handle == 101
+        assert [call[:2] for call in kernel32.calls] == [
+            ("create", None),
+            ("configure", 101),
+            ("assign", 101),
+        ]
+        assert kernel32.calls[-1] == ("assign", 101, 303)
+        assert kernel32.calls[1] == (
+            "configure",
+            101,
+            transport._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            transport._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            transport.ctypes.sizeof(transport._JobObjectExtendedLimitInformation),
+        )
+        assert transport._close_windows_job_object(handle, kernel32=kernel32) is True
+        assert kernel32.calls[-1] == ("close", 101)
+
+    @pytest.mark.parametrize(
+        ("updates", "expected_calls"),
+        [
+            ({"create_result": 0}, ["create"]),
+            ({"configure_result": 0}, ["create", "configure", "close"]),
+            (
+                {"assign_result": 0},
+                ["create", "configure", "assign", "close"],
+            ),
+        ],
+    )
+    def test_windows_job_setup_and_assignment_fail_closed_portably(
+        self, updates, expected_calls
+    ):
+        kernel32 = _FakeWindowsKernel32(**updates)
+
+        with pytest.raises(
+            RuntimeError, match=r"^process tree containment unavailable$"
+        ):
+            transport._create_windows_job_object(303, kernel32=kernel32)
+
+        assert [call[0] for call in kernel32.calls] == expected_calls
+
+    def test_windows_job_close_failure_is_reported_portably(self):
+        kernel32 = _FakeWindowsKernel32(close_result=0)
+        assert transport._close_windows_job_object(101, kernel32=kernel32) is False
+        assert kernel32.calls == [("close", 101)]
+
+    def test_windows_containment_persistent_close_failure_terminates_job_before_retry(
+        self,
+    ):
+        kernel32 = _FakeWindowsKernel32(close_result=0)
+        owner = transport._ProcessContainment(
+            platform_name="nt",
+            windows_job_handle=101,
+            windows_kernel32=kernel32,
+        )
+
+        assert transport._close_process_containment(owner) is False
+        assert kernel32.calls == [
+            ("close", 101),
+            ("terminate-job", 101, 1),
+            ("close", 101),
+        ]
+        assert owner.closed is False
+
+    def test_windows_job_is_assigned_before_suspended_primary_thread_resumes(self):
+        class FakeProcess:
+            pid = 404
+            _handle = 303
+
+        kernel32 = _FakeWindowsKernel32()
+
+        owner = transport._establish_process_containment(
+            FakeProcess(),
+            platform_name="nt",
+            kernel32=kernel32,
+        )
+
+        assert owner.windows_job_handle == 101
+        actions = [call[0] for call in kernel32.calls]
+        assert actions.index("assign") < actions.index("thread-resume")
+        assert actions == [
+            "create",
+            "configure",
+            "assign",
+            "snapshot",
+            "thread-first",
+            "thread-open",
+            "thread-resume",
+            "close",
+            "close",
+        ]
+        assert transport._close_process_containment(owner) is True
+
+    @pytest.mark.parametrize(
+        "updates",
+        [
+            {"snapshot_result": transport._WINDOWS_INVALID_HANDLE_VALUE},
+            {"first_thread_result": 0},
+            {"open_thread_result": 0},
+            {"resume_result": transport._WINDOWS_RESUME_FAILED},
+            {"resume_result": 2},
+        ],
+    )
+    def test_windows_suspended_launch_resume_failure_closes_job_and_fails_closed(
+        self, updates
+    ):
+        class FakeProcess:
+            pid = 404
+            _handle = 303
+
+        kernel32 = _FakeWindowsKernel32(**updates)
+
+        with pytest.raises(
+            RuntimeError, match=r"^process tree containment unavailable$"
+        ):
+            transport._establish_process_containment(
+                FakeProcess(),
+                platform_name="nt",
+                kernel32=kernel32,
+            )
+
+        assert ("close", 101) in kernel32.calls
+
+    def test_containment_setup_failure_reaps_child_and_uses_fixed_error(
+        self, monkeypatch
+    ):
+        calls = self._install_helper_popen(
+            monkeypatch,
+            "import time\ntime.sleep(60)\n",
+        )
+        monkeypatch.setattr(
+            transport,
+            "_establish_process_containment",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("containment-setup-canary")
+            ),
+        )
+
+        with pytest.raises(transport.ProbeTransportError) as caught:
+            transport.run_probe(
+                [PYTHON, "-I", "-c", "pass"],
+                environment_policy=transport.IMPORT_PROBE_POLICY,
+                timeout_seconds=1,
+            )
+
+        assert caught.value.kind == "invalid"
+        assert "canary" not in str(caught.value)
+        assert calls[0]["process"].poll() is not None
+        assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
+
+    def test_containment_close_failure_runs_all_cleanup_and_fails_closed(
+        self, monkeypatch
+    ):
+        calls = self._install_helper_popen(monkeypatch, "pass\n")
+        owner = object()
+        close_calls = []
+        monkeypatch.setattr(
+            transport,
+            "_establish_process_containment",
+            lambda *_args, **_kwargs: owner,
+        )
+        monkeypatch.setattr(
+            transport,
+            "_close_process_containment",
+            lambda selected: close_calls.append(selected) or False,
+        )
+
+        with pytest.raises(transport.ProbeTransportError) as caught:
+            transport.run_probe(
+                [PYTHON, "-I", "-c", "pass"],
+                environment_policy=transport.IMPORT_PROBE_POLICY,
+                timeout_seconds=1,
+            )
+
+        assert caught.value.kind == "invalid"
+        assert close_calls and all(selected is owner for selected in close_calls)
+        assert calls[0]["process"].poll() is not None
+        assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
+
     def test_zero_stdin_uses_devnull_and_profile_private_home(self, monkeypatch):
         calls = self._install_helper_popen(monkeypatch, "pass\n")
 
@@ -1188,6 +1602,134 @@ class TestTransportLifecycle:
             ("runtime-probe-stdin", False),
         ]
         assert calls[0]["process"].poll() is not None
+
+    def test_start_then_raise_thread_is_registered_stopped_and_joined(
+        self, monkeypatch
+    ):
+        calls = self._install_helper_popen(
+            monkeypatch,
+            "import time\ntime.sleep(60)\n",
+        )
+        real_start = threading.Thread.start
+        created = []
+
+        def delayed_cooperative_reader(
+            _pipe, _buffer, _overflow, _failed, stop, _eof, _deadline
+        ):
+            stop.wait()
+            time.sleep(0.2)
+
+        def start_then_raise(thread):
+            created.append(thread)
+            real_start(thread)
+            raise RuntimeError("start-then-raise-canary")
+
+        monkeypatch.setattr(transport, "_read_bounded_pipe", delayed_cooperative_reader)
+        monkeypatch.setattr(threading.Thread, "start", start_then_raise)
+
+        try:
+            with pytest.raises(transport.ProbeTransportError) as caught:
+                transport.run_probe(
+                    [PYTHON, "-I", "-c", "pass"],
+                    environment_policy=transport.IMPORT_PROBE_POLICY,
+                    timeout_seconds=1,
+                    thread_prefix="start-then-raise-probe-",
+                )
+
+            assert caught.value.kind == "invalid"
+            assert created
+            assert not any(thread.is_alive() for thread in created)
+            assert calls[0]["process"].poll() is not None
+            assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
+        finally:
+            for thread in created:
+                thread.join(1)
+
+    def test_never_started_thread_is_registered_and_cleanup_join_is_safe(
+        self, monkeypatch
+    ):
+        calls = self._install_helper_popen(
+            monkeypatch,
+            "import time\ntime.sleep(60)\n",
+        )
+        real_join_threads = transport._join_threads
+        registered = []
+
+        def start_raises(_thread):
+            raise RuntimeError("never-started-canary")
+
+        def recording_join(threads, deadline):
+            registered.extend(threads)
+            return real_join_threads(threads, deadline)
+
+        monkeypatch.setattr(threading.Thread, "start", start_raises)
+        monkeypatch.setattr(transport, "_join_threads", recording_join)
+
+        with pytest.raises(transport.ProbeTransportError) as caught:
+            transport.run_probe(
+                [PYTHON, "-I", "-c", "pass"],
+                environment_policy=transport.IMPORT_PROBE_POLICY,
+                timeout_seconds=1,
+                thread_prefix="never-started-probe-",
+            )
+
+        assert caught.value.kind == "invalid"
+        assert any(thread.name == "never-started-probe-stdout" for thread in registered)
+        assert calls[0]["process"].poll() is not None
+        assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
+
+    @pytest.mark.parametrize(
+        "failing_phase",
+        [
+            "_terminate_and_reap",
+            "_join_threads",
+            "_close_process_pipes",
+            "_remove_private_probe_root",
+        ],
+    )
+    def test_cleanup_phase_failure_cannot_escape_or_skip_later_phases(
+        self, monkeypatch, failing_phase
+    ):
+        calls = self._install_helper_popen(
+            monkeypatch,
+            "import time\ntime.sleep(60)\n",
+        )
+        phases = [
+            "_terminate_and_reap",
+            "_join_threads",
+            "_close_process_pipes",
+            "_remove_private_probe_root",
+        ]
+        observed = []
+
+        for phase in phases:
+            real_phase = getattr(transport, phase)
+
+            def guarded_phase(*args, _name=phase, _real=real_phase, **kwargs):
+                observed.append(_name)
+                result = _real(*args, **kwargs)
+                if _name == failing_phase:
+                    raise RuntimeError(f"{_name}-cleanup-canary")
+                return result
+
+            monkeypatch.setattr(transport, phase, guarded_phase)
+
+        with pytest.raises(transport.ProbeTransportError) as caught:
+            transport.run_probe(
+                [PYTHON, "-I", "-c", "pass"],
+                environment_policy=transport.IMPORT_PROBE_POLICY,
+                timeout_seconds=0.25,
+                thread_prefix="cleanup-phase-probe-",
+            )
+
+        assert "canary" not in str(caught.value)
+        assert all(phase in observed for phase in phases)
+        assert calls[0]["process"].poll() is not None
+        assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
+        assert not any(
+            thread.name.startswith("cleanup-phase-probe-")
+            for thread in threading.enumerate()
+        )
 
     def test_full_64k_stdin_is_deadline_bound(self, monkeypatch):
         calls = self._install_helper_popen(
@@ -1234,35 +1776,41 @@ class TestTransportLifecycle:
         assert calls[0]["process"].poll() is not None
         assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
 
-    def test_deadline_survives_descendant_holding_both_pipes(
+    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+    def test_direct_exit_still_terminates_grandchild_holding_both_pipes(
         self, monkeypatch, tmp_path
     ):
         pid_path = tmp_path / "descendant.pid"
         calls = self._install_helper_popen(
             monkeypatch,
             "import os,pathlib,subprocess,sys\n"
-            "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(2)'])\n"
+            "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\n"
             f"pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))\n"
-            "os.write(1,b'{}\\n')\n",
+            "os.write(1,b'payload\\n')\n",
         )
-        started = time.monotonic()
+        descendant_pid = None
 
         try:
-            with pytest.raises(transport.ProbeTransportError) as caught:
-                transport.run_probe(
-                    [PYTHON, "-I", "-c", "pass"],
-                    environment_policy=transport.IMPORT_PROBE_POLICY,
-                    stdin_bytes=b"{}\n",
-                    timeout_seconds=0.3,
-                )
-            assert caught.value.kind == "invalid"
-            assert time.monotonic() - started < 0.9
+            result = transport.run_probe(
+                [PYTHON, "-I", "-c", "pass"],
+                environment_policy=transport.IMPORT_PROBE_POLICY,
+                stdin_bytes=b"{}\n",
+                timeout_seconds=1,
+            )
+            assert result.returncode == 0
+            assert result.stdout == b"payload\n"
+            assert calls[0]["kwargs"]["start_new_session"] is True
+            assert _wait_until(pid_path.exists)
+            descendant_pid = int(pid_path.read_text())
+            assert _wait_until(lambda: not _pid_exists(descendant_pid))
             assert calls[0]["process"].poll() is not None
             assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
         finally:
-            if pid_path.exists():
+            if descendant_pid is None and pid_path.exists():
+                descendant_pid = int(pid_path.read_text())
+            if descendant_pid is not None and _pid_exists(descendant_pid):
                 try:
-                    os.kill(int(pid_path.read_text()), signal.SIGTERM)
+                    os.kill(descendant_pid, signal.SIGKILL)
                 except (OSError, ValueError):
                     pass
 
@@ -1308,6 +1856,48 @@ class TestRealImportChild:
         assert result.ok is True
         assert result.code == ""
         assert result.requested_module == ""
+
+    @pytest.mark.skipif(
+        os.name != "posix" or not hasattr(os, "fork"),
+        reason="requires POSIX fork inheritance",
+    )
+    def test_fork_inherited_protocol_descriptor_is_contained_after_direct_exit(
+        self, tmp_path
+    ):
+        package = tmp_path / "requests"
+        package.mkdir()
+        pid_path = tmp_path / "fork-descendant.pid"
+        package.joinpath("__init__.py").write_text(
+            "import os, pathlib, time\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            f"    pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))\n"
+            "    time.sleep(60)\n"
+            "    os._exit(0)\n"
+        )
+        descendant_pid = None
+
+        try:
+            result = protocol._probe_import_records_for_test(
+                (_import("requests"),),
+                python_invocation_path=PYTHON,
+                expected_profile=EXPECTED_PROFILE,
+                timeout_seconds=1,
+                extra_python_path=(str(tmp_path),),
+            )
+
+            assert result.ok is True
+            assert _wait_until(pid_path.exists)
+            descendant_pid = int(pid_path.read_text())
+            assert _wait_until(lambda: not _pid_exists(descendant_pid))
+        finally:
+            if descendant_pid is None and pid_path.exists():
+                descendant_pid = int(pid_path.read_text())
+            if descendant_pid is not None and _pid_exists(descendant_pid):
+                try:
+                    os.kill(descendant_pid, signal.SIGKILL)
+                except OSError:
+                    pass
 
     def test_child_invalid_request_exits_64_without_output(self):
         completed = subprocess.run(

@@ -57,11 +57,31 @@ class ExpectedProfile:
     version: str
     contract_sha256: str
 
+    def __post_init__(self) -> None:
+        if not (
+            _bounded_text(self.name, maximum=MAX_PROFILE_TEXT_BYTES)
+            and _bounded_text(self.version, maximum=MAX_PROFILE_TEXT_BYTES)
+            and type(self.contract_sha256) is str
+            and _LOWER_SHA256.fullmatch(self.contract_sha256) is not None
+        ):
+            raise ValueError("invalid expected profile")
+
 
 @dataclass(frozen=True, slots=True)
 class ImportName:
     name: str
     asname: str | None
+
+    def __post_init__(self) -> None:
+        if not (
+            _valid_imported_name(self.name, allow_star=True)
+            and (
+                self.asname is None
+                or _valid_imported_name(self.asname, allow_star=False)
+            )
+            and (self.name != "*" or self.asname is None)
+        ):
+            raise ValueError("invalid import name")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +91,29 @@ class ImportRecord:
     names: tuple[ImportName, ...]
     lineno: int
     col_offset: int
+
+    def __post_init__(self) -> None:
+        exact_fields = (
+            type(self.kind) is str
+            and type(self.module) is str
+            and type(self.names) is tuple
+            and type(self.lineno) is int
+            and type(self.col_offset) is int
+        )
+        if not exact_fields:
+            raise ValueError("invalid import record")
+        valid_shape = (self.kind == "import" and not self.names) or (
+            self.kind == "from"
+            and 0 < len(self.names) <= MAX_FROM_NAMES
+            and all(type(item) is ImportName for item in self.names)
+        )
+        if not (
+            _valid_module(self.module)
+            and 1 <= self.lineno <= MAX_SOURCE_LOCATION
+            and 0 <= self.col_offset <= MAX_SOURCE_LOCATION
+            and valid_shape
+        ):
+            raise ValueError("invalid import record")
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +379,8 @@ def collect_import_records(tree: ast.AST) -> tuple[ImportRecord, ...]:
                 }
             )
             for alias in node.names:
+                if type(alias.name) is not str:
+                    raise _request_error()
                 record = ImportRecord(
                     kind="import",
                     module=alias.name,
@@ -355,7 +400,17 @@ def collect_import_records(tree: ast.AST) -> tuple[ImportRecord, ...]:
                 )
                 sequence += 1
         elif isinstance(node, ast.ImportFrom):
-            if node.level != 0 or not node.module:
+            if (
+                type(node.level) is not int
+                or node.level != 0
+                or type(node.module) is not str
+                or not node.module
+                or any(
+                    type(alias.name) is not str
+                    or (alias.asname is not None and type(alias.asname) is not str)
+                    for alias in node.names
+                )
+            ):
                 raise _request_error()
             line, column = _normalize_location(
                 {
@@ -624,6 +679,8 @@ def _probe_import_records(
     timeout_seconds: float,
     extra_python_path: Sequence[str],
 ) -> ImportProbeResult:
+    if type(expected_profile) is not ExpectedProfile:
+        raise _request_error()
     request = encode_import_request(
         expected_profile=expected_profile,
         imports=imports,

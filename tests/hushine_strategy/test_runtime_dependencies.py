@@ -1,3 +1,4 @@
+import ctypes
 from dataclasses import FrozenInstanceError
 import importlib
 import importlib.metadata
@@ -37,6 +38,47 @@ distribution = "Alpha_Pkg"
 probe = "alpha.first"
 public = true
 """
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
+def _process_exists(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(0x1000, 0, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_uint32()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == 259
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _write_fixture(tmp_path: Path, text: str) -> Path:
@@ -1229,31 +1271,41 @@ def test_runner_cleans_up_when_reader_reports_failure(monkeypatch):
     assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
 
 
-def test_runner_deadline_survives_descendant_holding_both_pipes(monkeypatch, tmp_path):
+def test_runner_contains_descendant_holding_both_pipes(monkeypatch, tmp_path):
     profile = load_runtime_dependency_profile()
-    payload = canonical_probe_bytes(complete_probe_result(profile))
+    expected = complete_probe_result(profile)
+    payload = canonical_probe_bytes(expected)
     pid_path = tmp_path / "descendant.pid"
     calls = install_helper_popen(
         monkeypatch,
         "import os, pathlib, subprocess, sys\n"
         "child = subprocess.Popen([sys.executable, '-c', "
-        "'import time; time.sleep(2)'])\n"
+        "'import time; time.sleep(60)'])\n"
         f"pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))\n"
         f"os.write(1, {payload!r})\n",
     )
     monkeypatch.setattr(probe_transport, "PROFILE_PROBE_TIMEOUT_SECONDS", 0.3)
     monkeypatch.setattr(probe_transport, "PROBE_TERMINATE_GRACE_SECONDS", 0.1)
     started = time.monotonic()
+    descendant_pid = None
 
     try:
-        with pytest.raises(
-            RuntimeError,
-            match="target dependency probe returned an invalid response",
-        ):
-            runtime_dependencies._run_installed_probe(
-                os.path.abspath(os.path.normpath(sys.executable)), ">=3.12", {}
-            )
+        result = runtime_dependencies._run_installed_probe(
+            os.path.abspath(os.path.normpath(sys.executable)), ">=3.12", {}
+        )
+        assert result == expected
         assert time.monotonic() - started < 0.8
+        if os.name == "posix":
+            assert calls[0]["kwargs"]["start_new_session"] is True
+        else:
+            assert (
+                calls[0]["kwargs"]["creationflags"]
+                == probe_transport._WINDOWS_CREATE_NEW_PROCESS_GROUP
+                | probe_transport._WINDOWS_CREATE_SUSPENDED
+            )
+        assert pid_path.exists()
+        descendant_pid = int(pid_path.read_text())
+        assert _wait_until(lambda: not _process_exists(descendant_pid))
         assert calls[0]["process"].poll() is not None
         assert not Path(calls[0]["kwargs"]["cwd"]).parent.exists()
         assert not any(
@@ -1261,9 +1313,11 @@ def test_runner_deadline_survives_descendant_holding_both_pipes(monkeypatch, tmp
             for thread in threading.enumerate()
         )
     finally:
-        if pid_path.exists():
+        if descendant_pid is None and pid_path.exists():
+            descendant_pid = int(pid_path.read_text())
+        if descendant_pid is not None and _process_exists(descendant_pid):
             try:
-                os.kill(int(pid_path.read_text()), signal.SIGTERM)
+                os.kill(descendant_pid, signal.SIGTERM)
             except (OSError, ValueError):
                 pass
 

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
+import errno
 import math
 import os
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import sys
@@ -50,6 +53,66 @@ PROBE_PIPE_DRAIN_SECONDS = 0.1
 _SOURCE_DATE_EPOCH_MAX_DIGITS = 20
 _WINDOWS_ENV_KEYS = frozenset({"SYSTEMROOT", "WINDIR"})
 _WINDOWS_SECURE_DIRECTORY_MIN_VERSION = (3, 12, 4)
+_WINDOWS_CREATE_NEW_PROCESS_GROUP = getattr(
+    subprocess,
+    "CREATE_NEW_PROCESS_GROUP",
+    0x00000200,
+)
+_WINDOWS_CREATE_SUSPENDED = getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
+_WINDOWS_TH32CS_SNAPTHREAD = 0x00000004
+_WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
+_WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_WINDOWS_RESUME_FAILED = 0xFFFFFFFF
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_ulonglong),
+        ("WriteOperationCount", ctypes.c_ulonglong),
+        ("OtherOperationCount", ctypes.c_ulonglong),
+        ("ReadTransferCount", ctypes.c_ulonglong),
+        ("WriteTransferCount", ctypes.c_ulonglong),
+        ("OtherTransferCount", ctypes.c_ulonglong),
+    ]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobObjectBasicLimitInformation),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class _ThreadEntry32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ThreadID", ctypes.c_uint32),
+        ("th32OwnerProcessID", ctypes.c_uint32),
+        ("tpBasePri", ctypes.c_long),
+        ("tpDeltaPri", ctypes.c_long),
+        ("dwFlags", ctypes.c_uint32),
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +126,15 @@ class ProbeTransportError(RuntimeError):
     def __init__(self, kind: str):
         self.kind = kind
         super().__init__("probe transport failed")
+
+
+@dataclass(slots=True)
+class _ProcessContainment:
+    platform_name: str
+    process_group_id: int | None = None
+    windows_job_handle: int | None = None
+    windows_kernel32: object | None = None
+    closed: bool = False
 
 
 def _environment_keys(policy: object) -> frozenset[str]:
@@ -88,7 +160,7 @@ def sanitize_probe_environment(
     environment: dict[str, str] = {}
     seen: set[str] = set()
     for raw_key, value in selected.items():
-        if not isinstance(raw_key, str) or not isinstance(value, str):
+        if type(raw_key) is not str or type(value) is not str:
             continue
         canonical = raw_key.upper() if case_insensitive else raw_key
         if canonical not in allowed:
@@ -188,7 +260,7 @@ def _private_probe_environment(
 def valid_probe_argv(command: object) -> bool:
     if not isinstance(command, (list, tuple)) or not command:
         return False
-    if any(not isinstance(item, str) or not item or "\0" in item for item in command):
+    if any(type(item) is not str or not item or "\0" in item for item in command):
         return False
     executable = command[0]
     if not os.path.isabs(executable) or os.path.normpath(executable) != executable:
@@ -293,7 +365,249 @@ def _process_is_running(process: subprocess.Popen[bytes]) -> bool:
         return True
 
 
-def _terminate_and_reap(process: subprocess.Popen[bytes], deadline: float) -> bool:
+def _process_containment_popen_kwargs(
+    platform_name: str | None = None,
+) -> dict[str, object]:
+    selected_platform = os.name if platform_name is None else platform_name
+    if selected_platform == "posix":
+        return {"start_new_session": True}
+    if selected_platform == "nt":
+        return {
+            "creationflags": (
+                _WINDOWS_CREATE_NEW_PROCESS_GROUP | _WINDOWS_CREATE_SUSPENDED
+            )
+        }
+    raise RuntimeError("process tree containment unavailable")
+
+
+def _load_windows_kernel32():
+    loader = getattr(ctypes, "WinDLL", None)
+    if loader is None:
+        raise RuntimeError("process tree containment unavailable")
+    try:
+        kernel32 = loader("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel32.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        kernel32.SetInformationJobObject.restype = ctypes.c_int
+        kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+        kernel32.CreateToolhelp32Snapshot.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        kernel32.Thread32First.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_ThreadEntry32),
+        ]
+        kernel32.Thread32First.restype = ctypes.c_int
+        kernel32.Thread32Next.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_ThreadEntry32),
+        ]
+        kernel32.Thread32Next.restype = ctypes.c_int
+        kernel32.OpenThread.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_int,
+            ctypes.c_uint32,
+        ]
+        kernel32.OpenThread.restype = ctypes.c_void_p
+        kernel32.ResumeThread.argtypes = [ctypes.c_void_p]
+        kernel32.ResumeThread.restype = ctypes.c_uint32
+        kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.TerminateJobObject.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+    except Exception:
+        raise RuntimeError("process tree containment unavailable") from None
+    return kernel32
+
+
+def _close_windows_job_object(handle: int, *, kernel32=None) -> bool:
+    try:
+        selected_kernel32 = _load_windows_kernel32() if kernel32 is None else kernel32
+        return bool(selected_kernel32.CloseHandle(handle))
+    except Exception:
+        return False
+
+
+def _terminate_windows_job_object(handle: int, *, kernel32=None) -> bool:
+    try:
+        selected_kernel32 = _load_windows_kernel32() if kernel32 is None else kernel32
+        return bool(selected_kernel32.TerminateJobObject(handle, 1))
+    except Exception:
+        return False
+
+
+def _dispose_windows_job_object(handle: int, *, kernel32=None) -> bool:
+    selected_kernel32 = _load_windows_kernel32() if kernel32 is None else kernel32
+    if _close_windows_job_object(handle, kernel32=selected_kernel32):
+        return True
+    _terminate_windows_job_object(handle, kernel32=selected_kernel32)
+    return _close_windows_job_object(handle, kernel32=selected_kernel32)
+
+
+def _resume_windows_primary_thread(
+    process_id: int,
+    *,
+    kernel32,
+) -> None:
+    snapshot = 0
+    thread_handle = 0
+    cleanup_ok = True
+    resumed = False
+    try:
+        snapshot = kernel32.CreateToolhelp32Snapshot(_WINDOWS_TH32CS_SNAPTHREAD, 0)
+        if not snapshot or int(snapshot) == _WINDOWS_INVALID_HANDLE_VALUE:
+            raise RuntimeError("process tree containment unavailable")
+
+        entry = _ThreadEntry32()
+        entry.dwSize = ctypes.sizeof(entry)
+        has_entry = bool(kernel32.Thread32First(snapshot, ctypes.byref(entry)))
+        while has_entry:
+            if entry.th32OwnerProcessID == process_id:
+                thread_handle = kernel32.OpenThread(
+                    _WINDOWS_THREAD_SUSPEND_RESUME,
+                    0,
+                    entry.th32ThreadID,
+                )
+                break
+            has_entry = bool(kernel32.Thread32Next(snapshot, ctypes.byref(entry)))
+        if not thread_handle:
+            raise RuntimeError("process tree containment unavailable")
+        resumed = kernel32.ResumeThread(thread_handle) == 1
+        if not resumed:
+            raise RuntimeError("process tree containment unavailable")
+    except Exception:
+        raise RuntimeError("process tree containment unavailable") from None
+    finally:
+        if thread_handle:
+            try:
+                cleanup_ok = bool(kernel32.CloseHandle(thread_handle)) and cleanup_ok
+            except Exception:
+                cleanup_ok = False
+        if snapshot and int(snapshot) != _WINDOWS_INVALID_HANDLE_VALUE:
+            try:
+                cleanup_ok = bool(kernel32.CloseHandle(snapshot)) and cleanup_ok
+            except Exception:
+                cleanup_ok = False
+        if resumed and not cleanup_ok:
+            raise RuntimeError("process tree containment unavailable") from None
+
+
+def _create_windows_job_object(process_handle: int, *, kernel32=None) -> int:
+    selected_kernel32 = _load_windows_kernel32() if kernel32 is None else kernel32
+    handle = 0
+    try:
+        handle = selected_kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise RuntimeError("process tree containment unavailable")
+        limits = _JobObjectExtendedLimitInformation()
+        limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not selected_kernel32.SetInformationJobObject(
+            handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            raise RuntimeError("process tree containment unavailable")
+        if not selected_kernel32.AssignProcessToJobObject(handle, process_handle):
+            raise RuntimeError("process tree containment unavailable")
+        return int(handle)
+    except Exception:
+        if handle:
+            _dispose_windows_job_object(int(handle), kernel32=selected_kernel32)
+        raise RuntimeError("process tree containment unavailable") from None
+
+
+def _establish_process_containment(
+    process: subprocess.Popen[bytes],
+    *,
+    platform_name: str | None = None,
+    kernel32=None,
+) -> _ProcessContainment:
+    selected_platform = os.name if platform_name is None else platform_name
+    if selected_platform == "posix":
+        return _ProcessContainment(
+            platform_name="posix",
+            process_group_id=process.pid,
+        )
+    if selected_platform == "nt":
+        try:
+            process_handle = int(process._handle)  # type: ignore[attr-defined]
+        except Exception:
+            raise RuntimeError("process tree containment unavailable") from None
+        selected_kernel32 = _load_windows_kernel32() if kernel32 is None else kernel32
+        job_handle = _create_windows_job_object(
+            process_handle,
+            kernel32=selected_kernel32,
+        )
+        try:
+            _resume_windows_primary_thread(
+                process.pid,
+                kernel32=selected_kernel32,
+            )
+        except Exception:
+            _dispose_windows_job_object(job_handle, kernel32=selected_kernel32)
+            raise RuntimeError("process tree containment unavailable") from None
+        return _ProcessContainment(
+            platform_name="nt",
+            windows_job_handle=job_handle,
+            windows_kernel32=selected_kernel32,
+        )
+    raise RuntimeError("process tree containment unavailable")
+
+
+def _close_process_containment(containment: object) -> bool:
+    if not isinstance(containment, _ProcessContainment):
+        return False
+    if containment.closed:
+        return True
+    if containment.platform_name == "posix":
+        containment.closed = True
+        return True
+    if containment.platform_name != "nt" or containment.windows_job_handle is None:
+        return False
+    if not _dispose_windows_job_object(
+        containment.windows_job_handle,
+        kernel32=containment.windows_kernel32,
+    ):
+        return False
+    containment.closed = True
+    return True
+
+
+def _process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as error:
+        return error.errno != errno.ESRCH
+    return True
+
+
+def _signal_process_group(process_group_id: int, selected_signal: int) -> None:
+    try:
+        os.killpg(process_group_id, selected_signal)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        if error.errno != errno.ESRCH:
+            raise
+
+
+def _terminate_direct_process(
+    process: subprocess.Popen[bytes], deadline: float
+) -> bool:
     if _process_is_running(process):
         try:
             process.terminate()
@@ -320,6 +634,75 @@ def _terminate_and_reap(process: subprocess.Popen[bytes], deadline: float) -> bo
     return not _process_is_running(process)
 
 
+def _terminate_posix_process_group(
+    process: subprocess.Popen[bytes],
+    process_group_id: int,
+    deadline: float,
+) -> bool:
+    try:
+        if _process_group_exists(process_group_id):
+            _signal_process_group(process_group_id, signal.SIGTERM)
+    except Exception:
+        pass
+
+    if _process_is_running(process):
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            process.wait(timeout=min(PROBE_TERMINATE_GRACE_SECONDS, remaining / 2))
+        except Exception:
+            pass
+
+    try:
+        if _process_group_exists(process_group_id):
+            _signal_process_group(process_group_id, signal.SIGKILL)
+    except Exception:
+        pass
+
+    if _process_is_running(process):
+        try:
+            process.kill()
+        except Exception:
+            pass
+    try:
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except Exception:
+        pass
+
+    while time.monotonic() < deadline:
+        try:
+            if not _process_group_exists(process_group_id):
+                break
+        except Exception:
+            break
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    try:
+        group_absent = not _process_group_exists(process_group_id)
+    except Exception:
+        group_absent = False
+    return not _process_is_running(process) and group_absent
+
+
+def _terminate_and_reap(
+    process: subprocess.Popen[bytes],
+    deadline: float,
+    containment: object = None,
+) -> bool:
+    if isinstance(containment, _ProcessContainment):
+        if (
+            containment.platform_name == "posix"
+            and containment.process_group_id is not None
+        ):
+            return _terminate_posix_process_group(
+                process,
+                containment.process_group_id,
+                deadline,
+            )
+        if containment.platform_name == "nt":
+            closed = _close_process_containment(containment)
+            return _terminate_direct_process(process, deadline) and closed
+    return _terminate_direct_process(process, deadline)
+
+
 def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
     for pipe in (process.stdin, process.stdout, process.stderr):
         if pipe is not None:
@@ -329,12 +712,24 @@ def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
                 pass
 
 
-def _join_threads(threads: list[threading.Thread], deadline: float) -> None:
+def _join_threads(threads: list[threading.Thread], deadline: float) -> bool:
+    complete = True
     for thread in threads:
-        remaining = deadline - time.monotonic()
+        try:
+            remaining = deadline - time.monotonic()
+        except Exception:
+            complete = False
+            continue
         if remaining <= 0:
-            return
-        thread.join(remaining)
+            complete = False
+            continue
+        try:
+            thread.join(remaining)
+            if thread.is_alive():
+                complete = False
+        except Exception:
+            complete = False
+    return complete
 
 
 def run_probe(
@@ -366,6 +761,7 @@ def run_probe(
     run_deadline = deadline - cleanup_reserve
     private_root: Path | None = None
     process: subprocess.Popen[bytes] | None = None
+    containment: _ProcessContainment | None = None
     threads: list[threading.Thread] = []
     stdout_buffer = bytearray()
     stderr_buffer = bytearray()
@@ -394,7 +790,9 @@ def run_probe(
             stderr=subprocess.PIPE,
             close_fds=True,
             bufsize=0,
+            **_process_containment_popen_kwargs(),
         )
+        containment = _establish_process_containment(process)
         if process.stdout is None or process.stderr is None:
             failure = "invalid"
         else:
@@ -417,8 +815,8 @@ def run_probe(
                     name=f"{thread_prefix}{name}",
                     daemon=False,
                 )
-                thread.start()
                 threads.append(thread)
+                thread.start()
                 reader_eof.append(eof)
         if stdin_bytes is not None:
             if process.stdin is None:
@@ -437,8 +835,8 @@ def run_probe(
                     name=f"{thread_prefix}stdin",
                     daemon=False,
                 )
-                writer.start()
                 threads.append(writer)
+                writer.start()
 
         while not failure:
             if overflow.is_set():
@@ -460,42 +858,66 @@ def run_probe(
                 break
             overflow.wait(min(0.01, remaining))
 
-        if failure:
-            _terminate_and_reap(process, deadline)
-        else:
+        if not failure:
             try:
                 returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
             except Exception:
                 failure = "invalid"
-                _terminate_and_reap(process, deadline)
-
-        stop.set()
-        _join_threads(threads, deadline)
-        if any(thread.is_alive() for thread in threads):
-            failure = failure or "invalid"
-        if not failure and not all(event.is_set() for event in reader_eof):
-            failure = "invalid"
-        if stdin_bytes is not None and not failure and not writer_complete.is_set():
-            failure = "invalid"
-        if overflow.is_set():
-            failure = "overflow"
-        elif reader_failed.is_set() or writer_failed.is_set():
-            failure = failure or "invalid"
     except Exception:
         if process is None:
             failure = "launch"
         else:
             failure = failure or "invalid"
-            _terminate_and_reap(process, deadline)
     finally:
-        if process is not None and _process_is_running(process):
-            _terminate_and_reap(process, deadline)
-        stop.set()
-        _join_threads(threads, deadline)
+        cleanup_failed = False
         if process is not None:
-            _close_process_pipes(process)
-        if private_root is not None and not _remove_private_probe_root(private_root):
+            try:
+                if not _terminate_and_reap(process, deadline, containment):
+                    cleanup_failed = True
+            except Exception:
+                cleanup_failed = True
+        if containment is not None:
+            try:
+                if not _close_process_containment(containment):
+                    cleanup_failed = True
+            except Exception:
+                cleanup_failed = True
+        try:
+            stop.set()
+        except Exception:
+            cleanup_failed = True
+        try:
+            if not _join_threads(threads, deadline):
+                cleanup_failed = True
+        except Exception:
+            cleanup_failed = True
+        if process is not None:
+            try:
+                _close_process_pipes(process)
+            except Exception:
+                cleanup_failed = True
+        try:
+            if not _join_threads(threads, deadline):
+                cleanup_failed = True
+        except Exception:
+            cleanup_failed = True
+        if private_root is not None:
+            try:
+                if not _remove_private_probe_root(private_root):
+                    cleanup_failed = True
+            except Exception:
+                cleanup_failed = True
+        if cleanup_failed:
             failure = failure or "invalid"
+
+    if overflow.is_set():
+        failure = "overflow"
+    elif reader_failed.is_set() or writer_failed.is_set():
+        failure = failure or "invalid"
+    if not failure and not all(event.is_set() for event in reader_eof):
+        failure = "invalid"
+    if stdin_bytes is not None and not failure and not writer_complete.is_set():
+        failure = "invalid"
 
     if failure:
         raise ProbeTransportError(failure) from None
