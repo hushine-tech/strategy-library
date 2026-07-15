@@ -31,12 +31,12 @@ _DEPENDENCY_FIELDS = frozenset(
     {"import_root", "distribution", "probe", "public"}
 )
 _SEMVER_PATTERN = re.compile(
-    r"(?:0|[1-9]\d*)\."
-    r"(?:0|[1-9]\d*)\."
-    r"(?:0|[1-9]\d*)"
+    r"(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)"
     r"(?:-(?:"
-    r"(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
-    r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*"
+    r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*"
     r"))?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
@@ -412,7 +412,7 @@ def _safe_exception_reason(error: BaseException) -> str:
     redactions.update(
         value for value in os.environ.values() if len(value) >= 4
     )
-    for value in sorted(redactions, key=len, reverse=True):
+    for value in sorted(redactions, key=lambda value: (-len(value), value)):
         if value:
             message = message.replace(value, "<redacted>")
     message = _PATH_PATTERN.sub("<path>", message)

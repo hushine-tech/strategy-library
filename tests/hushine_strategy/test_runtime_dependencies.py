@@ -227,7 +227,16 @@ def test_invalid_schema_fixture_is_rejected(tmp_path, manifest):
 
 @pytest.mark.parametrize(
     "version",
-    ["1", "1.0", "v1.0.0", "01.0.0", "1.01.0", "1.0.01", "1.0.0-01"],
+    [
+        "1",
+        "1.0",
+        "v1.0.0",
+        "01.0.0",
+        "1.01.0",
+        "1.0.01",
+        "1.0.0-01",
+        "1١.0.0",
+    ],
 )
 def test_profile_version_must_be_strict_semver(tmp_path, version):
     manifest = _VALID_FIXTURE.replace(
@@ -479,6 +488,39 @@ def test_installed_probe_sanitizes_failures_and_import_output(
     assert leaked_path not in encoded
     assert "sys.path" not in encoded
     assert "environment" not in encoded
+
+
+def test_safe_exception_redaction_is_order_independent_for_equal_length_overlaps(
+    monkeypatch,
+):
+    class OrderedRedactions:
+        def __init__(self, values):
+            self._values = []
+            self.update(values)
+
+        def add(self, value):
+            if value not in self._values:
+                self._values.append(value)
+
+        def update(self, values):
+            for value in values:
+                self.add(value)
+
+        def __iter__(self):
+            return iter(self._values)
+
+    monkeypatch.setattr(runtime_dependencies, "set", OrderedRedactions, raising=False)
+    monkeypatch.setattr(runtime_dependencies.os, "getcwd", lambda: "/unrelated")
+    monkeypatch.setattr(runtime_dependencies.os, "environ", {})
+
+    reasons = []
+    for paths in (["abcd", "bcde"], ["bcde", "abcd"]):
+        monkeypatch.setattr(runtime_dependencies.sys, "path", paths)
+        reasons.append(
+            runtime_dependencies._safe_exception_reason(RuntimeError("abcde"))
+        )
+
+    assert reasons == ["RuntimeError: <redacted>e"] * 2
 
 
 def test_installed_probe_reports_target_python_version_mismatch(
