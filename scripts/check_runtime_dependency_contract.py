@@ -18,7 +18,6 @@ from hushine_strategy.runtime_dependencies import (
     load_runtime_dependency_profile,
 )
 
-
 BEGIN_MARKER = "# BEGIN GENERATED RUNTIME DEPENDENCY PROJECTION"
 END_MARKER = "# END GENERATED RUNTIME DEPENDENCY PROJECTION"
 MANIFEST_PATH = "hushine_strategy/runtime_dependencies.toml"
@@ -134,11 +133,24 @@ def _projection_region(
         ),
         None,
     )
+    if dependency_start is None:
+        return None, (_violation("PROJECTION_MARKERS_CORRUPT", str(pyproject_path)),)
     dependency_end = next(
-        (index for index in range(end + 1, len(lines)) if lines[index].strip() == "]"),
+        (
+            index
+            for index in range(dependency_start + 1, len(lines))
+            if lines[index].strip() == "]"
+        ),
         None,
     )
-    if dependency_start is None or dependency_end is None:
+    if (
+        dependency_end is None
+        or not dependency_start < begin < end < dependency_end
+        or any(
+            lines[index].strip().startswith("[")
+            for index in range(dependency_start + 1, dependency_end)
+        )
+    ):
         return None, (_violation("PROJECTION_MARKERS_CORRUPT", str(pyproject_path)),)
     section_start = next(
         (
@@ -463,8 +475,25 @@ def check_baseline(
     if resolve.returncode != 0:
         raise ContractConfigurationError(f"cannot resolve baseline ref: {baseline_ref}")
     commit = resolve.stdout.strip()
-    baseline = _git(root, "show", f"{commit}:{MANIFEST_PATH}")
-    if baseline.returncode == 0:
+    tree = _git(
+        root,
+        "ls-tree",
+        "--full-tree",
+        "--name-only",
+        commit,
+        "--",
+        MANIFEST_PATH,
+    )
+    if tree.returncode != 0:
+        raise ContractConfigurationError("cannot inspect baseline manifest tree")
+    tree_paths = tuple(tree.stdout.splitlines())
+    if tree_paths not in ((), (MANIFEST_PATH,)):
+        raise ContractConfigurationError("cannot inspect baseline manifest tree")
+
+    if tree_paths:
+        baseline = _git(root, "show", f"{commit}:{MANIFEST_PATH}")
+        if baseline.returncode != 0:
+            raise ContractConfigurationError("cannot read baseline manifest")
         violations = check_profile_change(
             baseline.stdout.encode("utf-8"), current_manifest
         )

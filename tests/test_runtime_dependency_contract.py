@@ -23,7 +23,6 @@ from scripts.check_runtime_dependency_contract import (
     sync_project_projection,
 )
 
-
 BEGIN = "# BEGIN GENERATED RUNTIME DEPENDENCY PROJECTION"
 END = "# END GENERATED RUNTIME DEPENDENCY PROJECTION"
 INITIAL_MANIFEST = (
@@ -248,6 +247,79 @@ def test_unresolved_baseline_ref_is_a_configuration_error(tmp_path):
         check_baseline(repo, "does-not-exist", INITIAL_MANIFEST)
 
 
+def test_baseline_manifest_read_failure_is_cli_configuration_error(
+    tmp_path, monkeypatch, capsys
+):
+    commit = "a" * 40
+
+    def git_result(repository, *arguments):
+        command = ["git", "-C", str(repository), *arguments]
+        if arguments == ("rev-parse", "--show-toplevel"):
+            return subprocess.CompletedProcess(command, 0, f"{tmp_path}\n", "")
+        if arguments == ("rev-parse", "--verify", "HEAD^{commit}"):
+            return subprocess.CompletedProcess(command, 0, f"{commit}\n", "")
+        if arguments == (
+            "ls-tree",
+            "--full-tree",
+            "--name-only",
+            commit,
+            "--",
+            checker.MANIFEST_PATH,
+        ):
+            return subprocess.CompletedProcess(
+                command, 0, f"{checker.MANIFEST_PATH}\n", ""
+            )
+        if arguments == ("show", f"{commit}:{checker.MANIFEST_PATH}"):
+            return subprocess.CompletedProcess(command, 128, "", "object read failed")
+        raise AssertionError(f"unexpected git invocation: {arguments!r}")
+
+    monkeypatch.setattr(checker, "_git", git_result)
+
+    status = checker.main(["--baseline-only", "--baseline-ref", "HEAD", "--json"])
+
+    assert status == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "CONFIGURATION_ERROR"
+    assert "cannot read baseline manifest" in payload["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("tree_status", "tree_stdout"),
+    [(128, ""), (0, "unexpected/path.toml\n")],
+)
+def test_baseline_tree_inspection_must_succeed_and_be_unambiguous(
+    tmp_path, monkeypatch, tree_status, tree_stdout
+):
+    commit = "b" * 40
+
+    def git_result(repository, *arguments):
+        command = ["git", "-C", str(repository), *arguments]
+        if arguments == ("rev-parse", "--show-toplevel"):
+            return subprocess.CompletedProcess(command, 0, f"{tmp_path}\n", "")
+        if arguments == ("rev-parse", "--verify", "HEAD^{commit}"):
+            return subprocess.CompletedProcess(command, 0, f"{commit}\n", "")
+        if arguments == (
+            "ls-tree",
+            "--full-tree",
+            "--name-only",
+            commit,
+            "--",
+            checker.MANIFEST_PATH,
+        ):
+            return subprocess.CompletedProcess(
+                command, tree_status, tree_stdout, "tree inspection failed"
+            )
+        raise AssertionError(f"unexpected git invocation: {arguments!r}")
+
+    monkeypatch.setattr(checker, "_git", git_result)
+
+    with pytest.raises(
+        ContractConfigurationError, match="cannot inspect baseline manifest"
+    ):
+        check_baseline(tmp_path, "HEAD", INITIAL_MANIFEST)
+
+
 def test_projection_write_is_manifest_derived_idempotent_and_scoped(tmp_path):
     project, _ = write_project(
         tmp_path,
@@ -317,6 +389,33 @@ def test_marker_corruption_is_rejected(tmp_path, lines, expected):
     project.write_text("\n".join(lines) + "\n")
 
     assert codes(sync_project_projection(profile_for("numpy"), project)) == [expected]
+
+
+def test_markers_after_project_dependencies_are_rejected_without_writing(tmp_path):
+    project = tmp_path / "pyproject.toml"
+    project.write_text(
+        "\n".join(
+            [
+                "[project]",
+                'name = "fixture"',
+                'version = "0.1.0"',
+                "dependencies = [",
+                "]",
+                BEGIN,
+                END,
+                "[tool.fixture]",
+                "items = [",
+                "]",
+                "",
+            ]
+        )
+    )
+    before = project.read_bytes()
+
+    violations = sync_project_projection(profile_for("numpy"), project, write=True)
+
+    assert codes(violations) == ["PROJECTION_MARKERS_CORRUPT"]
+    assert project.read_bytes() == before
 
 
 def test_public_distribution_outside_generated_block_is_rejected(tmp_path):
