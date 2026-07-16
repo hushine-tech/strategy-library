@@ -1,6 +1,6 @@
 # Strategy Library
 
-> 更新时间：2026-07-10
+> 更新时间：2026-07-16
 
 ## 概述
 
@@ -61,6 +61,42 @@ from utils.log import get_logger
 ```
 
 `utils.log` 提供 Python Elemental 兼容的结构化日志、gRPC interceptor 和 OpenTelemetry tracing。`utils.middleware` 下还保留共享的 gRPC / Kafka middleware 封装。
+
+---
+
+## Runtime Python 依赖清单
+
+`hushine_strategy/runtime_dependencies.toml` 是 Hosted Runtime 和独立
+strategy-debugger-cli 的唯一依赖契约源。它固定：
+
+- schema、profile name/version；
+- Hosted Python `3.13` 和 debugger Python `>=3.12`；
+- 每个公开 import root、distribution、probe module 和 public 标志；
+- manifest 原始字节的 SHA-256 digest。
+
+`strategy-service` 与 `strategy-debugger-cli` 的 `pyproject.toml` 中
+`BEGIN/END GENERATED RUNTIME DEPENDENCY PROJECTION` 区块由该 manifest 生成。
+公开 distribution 必须是两个消费者的直接依赖并进入各自 lock；不能通过传递
+依赖、手改 lock 或 Dockerfile 临时安装来扩展策略 surface。本库保持无
+`uv.lock`，以 isolated `uv run --no-project --with-editable '.[test]'` 验证。
+
+manifest 字节变化必须提升到严格更大的 SemVer profile version，并与显式、
+不可变的已部署 Git SHA 比较。首次引入只接受 schema 1 / `1.0.0` / 初始 digest；
+稳定发布以 baseline state `present` 为准，不能使用移动分支。
+
+相关共享实现：
+
+- `runtime_dependencies.py`：严格加载 manifest、安装态 probe 和安全错误模型；
+- `import_validation.py`：静态依赖、平台 import surface 和动态导入安全校验；
+- `hushine_runtime_import_probe`：在隔离子进程中探测用户请求的 imports，避免
+  把 import 副作用带回 worker/control process。
+
+平台 import surface 是目标相关的：Debugger 只接受 SDK surface；Hosted 另外
+接受 `strategy_service.types` 中明确列出的兼容符号。两者都允许诸如
+`from hushine_strategy import Exchange` 的 canonical from-import，但拒绝
+`import hushine_strategy`、未列出的 nested symbol 和平台 module object。标准库
+以及 manifest 公开 third-party roots 独立处理；`importlib`、`exec`、builtins
+smuggling 等动态入口由 Hosted 默认安全策略拒绝。
 
 ---
 
