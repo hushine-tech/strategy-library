@@ -217,6 +217,7 @@ _SAFE_BUILTINS = {
     "sorted": sorted,
     "str": str,
     "sum": sum,
+    "type": type,
     "tuple": tuple,
     "zip": zip,
 }
@@ -233,6 +234,10 @@ class ReplayConfig:
     risk_facts: Mapping[tuple[int, str, str, str], Mapping[str, Any]] = field(default_factory=dict)
     default_fee_rate: Any = "0.0004"
     slippage_bps: Any = "0"
+    expected_input_identities: tuple[
+        tuple[str, str, str, str, str, str], ...
+    ] | None = None
+    expected_order_target_keys: tuple[tuple[str, str, str], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -541,11 +546,51 @@ def _load_strategy(code: str, strategy_path: str):
     return strategy_cls()
 
 
+def _canonical_replay_input_identity(
+    item: StrategyInput,
+) -> tuple[str, str, str, str, str, str]:
+    exchange = _normalize_exchange(item.exchange)
+    market = _normalize_market(item.market)
+    kind = str(item.kind or "kline").strip().lower()
+    symbol = str(item.symbol or "").strip().upper()
+    interval = str(item.interval or "").strip()
+    stream_id = str(item.stream_id or "").strip()
+    if not stream_id:
+        stream_id = "-".join(
+            (exchange, market, kind, symbol, interval)
+        ).lower()
+    return (stream_id, exchange, market, kind, symbol, interval)
+
+
+def _verify_immutable_replay_declarations(
+    config: ReplayConfig,
+    inputs: list[StrategyInput],
+    order_targets: list[StrategyOrderTarget],
+) -> None:
+    if config.expected_input_identities is not None:
+        actual_inputs = tuple(
+            sorted(_canonical_replay_input_identity(item) for item in inputs)
+        )
+        expected_inputs = tuple(sorted(config.expected_input_identities))
+        if actual_inputs != expected_inputs:
+            raise ValueError(
+                "strategy INPUTS do not match immutable replay declarations"
+            )
+    if config.expected_order_target_keys is not None:
+        actual_targets = tuple(sorted(item.key for item in order_targets))
+        expected_targets = tuple(sorted(config.expected_order_target_keys))
+        if actual_targets != expected_targets:
+            raise ValueError(
+                "strategy ORDER_TARGETS do not match immutable replay declarations"
+            )
+
+
 def run_replay(config: ReplayConfig) -> ReplayResult:
     strategy = _load_strategy(config.strategy_code, config.strategy_path)
     setattr(strategy, "notify", config.notifier or LocalNotifier())
     inputs = parse_declared_inputs(getattr(strategy, "INPUTS", None))
     order_targets = parse_order_targets(getattr(strategy, "ORDER_TARGETS", None))
+    _verify_immutable_replay_declarations(config, inputs, order_targets)
     if isinstance(config.wallet, PortfolioWallet):
         portfolio_wallet = config.wallet
     elif isinstance(config.wallet, FuturesWallet):

@@ -974,3 +974,82 @@ class MyStrategy:
     assert result.bars_processed == 2
     assert result.orders_filled == 1
     assert wallet.position_qty("BTCUSDT") == 0.01
+
+
+def test_run_replay_rejects_strategy_declaration_drift_before_consuming_ticks():
+    strategy_code = """
+class MyStrategy:
+    INPUTS = [{"stream_id": "futures-btc", "exchange": "binance", "market": "perpetual_futures", "kind": "kline", "symbol": "BTCUSDT", "interval": "1m"}]
+    ORDER_TARGETS = []
+
+    def __init__(self):
+        type(self).INPUTS = [{"stream_id": "spot-btc", "exchange": "binance", "market": "spot", "kind": "kline", "symbol": "BTCUSDT", "interval": "1m"}]
+        type(self).ORDER_TARGETS = [{"exchange": "binance", "market": "spot", "symbol": "BTCUSDT"}]
+
+    def on_market_data(self, data, wallet):
+        return None
+"""
+    consumed = False
+
+    def ticks():
+        nonlocal consumed
+        consumed = True
+        yield MarketData(
+            stream_id="futures-btc",
+            exchange="binance",
+            market="perpetual_futures",
+            kind="kline",
+            symbol="BTCUSDT",
+            interval="1m",
+            price=50_000,
+            timestamp=1,
+        )
+
+    with pytest.raises(ValueError, match="INPUTS do not match immutable replay declarations"):
+        run_replay(ReplayConfig(
+            strategy_code=strategy_code,
+            ticks=ticks(),
+            wallet=FuturesWallet(initial_balance=1000),
+            expected_input_identities=((
+                "futures-btc", "binance", "perpetual_futures", "kline", "BTCUSDT", "1m",
+            ),),
+            expected_order_target_keys=(),
+        ))
+
+    assert consumed is False
+
+
+def test_run_replay_immutable_declarations_apply_legacy_stream_defaults():
+    strategy_code = """
+class MyStrategy:
+    INPUTS = [{"exchange": "binance", "market": "perpetual_futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    ORDER_TARGETS = []
+    def on_market_data(self, data, wallet):
+        return None
+"""
+
+    result = run_replay(ReplayConfig(
+        strategy_code=strategy_code,
+        ticks=[MarketData(
+            stream_id="binance-perpetual_futures-kline-btcusdt-1m",
+            exchange="binance",
+            market="perpetual_futures",
+            kind="kline",
+            symbol="BTCUSDT",
+            interval="1m",
+            price=50_000,
+            timestamp=1,
+        )],
+        wallet=FuturesWallet(initial_balance=1000),
+        expected_input_identities=((
+            "binance-perpetual_futures-kline-btcusdt-1m",
+            "binance",
+            "perpetual_futures",
+            "kline",
+            "BTCUSDT",
+            "1m",
+        ),),
+        expected_order_target_keys=(),
+    ))
+
+    assert result.bars_processed == 1
