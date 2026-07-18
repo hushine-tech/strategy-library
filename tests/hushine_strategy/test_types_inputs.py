@@ -168,6 +168,58 @@ def test_input_view_normalizes_public_strategy_input_keys():
     assert view.exchange["binance"]["perpetual_futures"].symbol["BTCUSDT"].interval["1m"] == tick
 
 
+def test_input_view_keeps_full_stream_identities_and_rejects_ambiguous_legacy_lookup():
+    view = InputView([
+        StrategyInput(
+            exchange="binance",
+            market="perpetual_futures",
+            symbol="BTCUSDT",
+            interval="1m",
+            stream_id="btc-kline",
+            kind="kline",
+        ),
+        StrategyInput(
+            exchange="binance",
+            market="perpetual_futures",
+            symbol="BTCUSDT",
+            interval="1m",
+            stream_id="btc-mark",
+            kind="mark_price",
+        ),
+    ])
+    kline = MarketData(
+        stream_id="btc-kline",
+        exchange="binance",
+        market="perpetual_futures",
+        kind="kline",
+        symbol="BTCUSDT",
+        interval="1m",
+        price=100,
+        timestamp=1,
+    )
+    mark = MarketData(
+        stream_id="btc-mark",
+        exchange="binance",
+        market="perpetual_futures",
+        kind="mark_price",
+        symbol="BTCUSDT",
+        interval="1m",
+        price=101,
+        timestamp=2,
+    )
+
+    assert view.update(kline) is True
+    assert view.update(mark) is True
+    assert view.get_stream(
+        "btc-kline", "binance", "perpetual_futures", "kline", "BTCUSDT", "1m"
+    ) is kline
+    assert view.get_stream(
+        "btc-mark", "binance", "perpetual_futures", "mark_price", "BTCUSDT", "1m"
+    ) is mark
+    with pytest.raises(KeyError, match="ambiguous market-data route"):
+        view.exchange["binance"]["perpetual_futures"].symbol["BTCUSDT"].interval["1m"]
+
+
 def test_parse_order_targets_normalizes_symbol_scoped_target():
     targets = parse_order_targets([
         {"exchange": "Binance", "market": "perpetual_futures", "symbol": "btcusdt"},

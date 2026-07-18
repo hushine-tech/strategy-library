@@ -1,5 +1,6 @@
 import os
 import types
+from decimal import Decimal
 
 import pytest
 
@@ -14,6 +15,7 @@ from hushine_strategy.runtime_dependencies import load_runtime_dependency_profil
 from hushine_strategy.types import MarketData
 from hushine_strategy.validator import ALLOWED_IMPORT_ROOTS
 from hushine_strategy.wallet.futures import FuturesWallet
+from hushine_strategy.wallet import PortfolioWallet, SpotSymbolMetadata, SpotWallet
 
 
 STRATEGY_CODE = """
@@ -419,15 +421,15 @@ def test_replay_rejects_order_target_mismatch():
         run_replay(ReplayConfig(strategy_code=TARGET_MISMATCH_STRATEGY_CODE, ticks=[_btcusdt_tick()], wallet=wallet))
 
 
-def test_replay_rejects_non_perpetual_futures_order_target():
+def test_replay_requires_route_aware_wallet_for_spot_target():
     wallet = FuturesWallet(initial_balance=1000.0)
-    with pytest.raises(ValueError, match="local replay only supports perpetual_futures ORDER_TARGETS"):
+    with pytest.raises(ValueError, match="PortfolioWallet is required for Spot replay"):
         run_replay(ReplayConfig(strategy_code=SPOT_ORDER_TARGET_STRATEGY_CODE, ticks=[_btcusdt_tick()], wallet=wallet))
 
 
 def test_replay_rejects_legacy_futures_market_order_decision():
     wallet = FuturesWallet(initial_balance=1000.0)
-    with pytest.raises(ValueError, match="local replay only supports perpetual_futures orders"):
+    with pytest.raises(ValueError, match="does not support order market futures"):
         run_replay(ReplayConfig(strategy_code=LEGACY_MARKET_ORDER_STRATEGY_CODE, ticks=[_btcusdt_tick()], wallet=wallet))
 
 
@@ -835,3 +837,140 @@ def test_futures_wallet_flip_entry_price_uses_flip_fill_price():
     )
     assert wallet.position_qty("BTCUSDT") == -0.5
     assert wallet.position_entry_price("BTCUSDT") == 110.0
+
+
+def test_run_replay_executes_declared_spot_target_with_immutable_facts():
+    strategy_code = """
+from hushine_strategy import Exchange, Market, OrderDecision, OrderSide, OrderType
+
+class MyStrategy:
+    INPUTS = [{"exchange": Exchange.BINANCE, "market": Market.SPOT, "symbol": "BTCUSDT", "interval": "1m"}]
+    ORDER_TARGETS = [{"exchange": Exchange.BINANCE, "market": Market.SPOT, "symbol": "BTCUSDT"}]
+
+    def __init__(self):
+        self.done = False
+
+    def on_market_data(self, data, wallet):
+        if self.done:
+            return None
+        self.done = True
+        return OrderDecision(
+            exchange=Exchange.BINANCE,
+            market=Market.SPOT,
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            qty="0.01",
+            order_type=OrderType.MARKET,
+        )
+"""
+    metadata = SpotSymbolMetadata(
+        venue_id=10,
+        exchange="binance",
+        market="spot",
+        symbol="BTCUSDT",
+        status="TRADING",
+        base_asset="BTC",
+        quote_asset="USDT",
+        base_asset_precision=8,
+        quote_asset_precision=8,
+        spot_trading_allowed=True,
+        filters=(
+            {"filter_type": "LOT_SIZE", "min_qty": "0.00001", "max_qty": "9000", "step_size": "0.00001"},
+            {"filter_type": "MIN_NOTIONAL", "min_notional": "5", "apply_to_market": True},
+        ),
+    )
+    spot = SpotWallet.from_assets({"USDT": ("1000", "0")})
+    wallet = PortfolioWallet(
+        allowed_routes={("binance", "spot")},
+        wallets={("binance", "spot", 10): spot},
+    )
+
+    result = run_replay(ReplayConfig(
+        strategy_code=strategy_code,
+        ticks=[MarketData(
+            stream_id="spot-btc-1m",
+            exchange="binance",
+            market="spot",
+            kind="kline",
+            symbol="BTCUSDT",
+            interval="1m",
+            price=50_000,
+            timestamp=1,
+        )],
+        wallet=wallet,
+        metadata={metadata.route_key: metadata},
+        risk_facts={metadata.route_key: {
+            "snapshot_id": "facts-1",
+            "reference_price_decimal": "50000",
+        }},
+        default_fee_rate="0.001",
+    ))
+
+    assert result.bars_processed == 1
+    assert result.orders_filled == 1
+    assert spot.assets["BTC"].free == Decimal("0.01")
+    assert spot.assets["USDT"].free == Decimal("499.5")
+
+
+def test_run_replay_keeps_same_route_stream_id_and_kind_visible_to_strategy():
+    strategy_code = """
+from hushine_strategy import Exchange, Market, OrderDecision, OrderSide, OrderType
+
+class MyStrategy:
+    INPUTS = [
+        {"stream_id": "btc-kline", "exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "kind": "kline", "symbol": "BTCUSDT", "interval": "1m"},
+        {"stream_id": "btc-mark", "exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "kind": "mark_price", "symbol": "BTCUSDT", "interval": "1m"},
+    ]
+    ORDER_TARGETS = [{"exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "symbol": "BTCUSDT"}]
+
+    def __init__(self):
+        self.done = False
+
+    def on_market_data(self, data, wallet):
+        kline = data.get_stream("btc-kline", Exchange.BINANCE, Market.PERPETUAL_FUTURES, "kline", "BTCUSDT", "1m")
+        mark = data.get_stream("btc-mark", Exchange.BINANCE, Market.PERPETUAL_FUTURES, "mark_price", "BTCUSDT", "1m")
+        if self.done or kline is None or mark is None:
+            return None
+        self.done = True
+        return OrderDecision(
+            exchange=Exchange.BINANCE,
+            market=Market.PERPETUAL_FUTURES,
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            qty="0.01",
+            order_type=OrderType.MARKET,
+        )
+"""
+    ticks = [
+        MarketData(
+            stream_id="btc-kline",
+            exchange="binance",
+            market="perpetual_futures",
+            kind="kline",
+            symbol="BTCUSDT",
+            interval="1m",
+            price=50_000,
+            timestamp=1,
+        ),
+        MarketData(
+            stream_id="btc-mark",
+            exchange="binance",
+            market="perpetual_futures",
+            kind="mark_price",
+            symbol="BTCUSDT",
+            interval="1m",
+            price=50_100,
+            timestamp=2,
+        ),
+    ]
+    wallet = FuturesWallet(initial_balance=1000)
+
+    result = run_replay(ReplayConfig(
+        strategy_code=strategy_code,
+        ticks=ticks,
+        wallet=wallet,
+    ))
+
+    assert result.bars_processed == 2
+    assert result.orders_filled == 1
+    assert wallet.position_qty("BTCUSDT") == 0.01

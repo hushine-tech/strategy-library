@@ -103,6 +103,8 @@ class MarketData:
     exchange: str = Exchange.BINANCE
     market: str = Market.PERPETUAL_FUTURES
     interval: str = "1m"
+    stream_id: str = ""
+    kind: str = "kline"
     open: float | None = None
     high: float | None = None
     low: float | None = None
