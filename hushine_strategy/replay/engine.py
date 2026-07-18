@@ -288,6 +288,7 @@ class ReplayEngine:
         if self.slippage_bps >= Decimal("10000"):
             raise ValueError("slippage bps must be less than 10000")
         self._prices: dict[tuple[str, str, str, str, str, str], Decimal] = {}
+        self._route_prices: dict[tuple[str, str, str], Decimal] = {}
         self._order_ids = count(1)
         for item in self.metadata.values():
             route_wallet = self.wallet.get(
@@ -404,6 +405,7 @@ class ReplayEngine:
         else:
             raise ValueError(f"offline replay does not support market {market}")
         self._prices[identity] = price
+        self._route_prices[(exchange, market, symbol)] = price
         return True
 
     def last_price(self, identity: tuple[str, str, str, str, str, str]) -> Decimal | None:
@@ -421,7 +423,12 @@ class ReplayEngine:
             for order in wallet.open_orders.values()
         ]
 
-    def execute_order(self, decision: OrderDecision, *, mark_price: Any) -> bool:
+    def execute_order(
+        self,
+        decision: OrderDecision,
+        *,
+        mark_price: Any | None = None,
+    ) -> bool:
         try:
             exchange = _normalize_exchange(decision.exchange)
             market = _normalize_market(decision.market)
@@ -434,11 +441,17 @@ class ReplayEngine:
         if target_key not in self.order_target_keys:
             raise ValueError(f"order target {target_key} is not declared in ORDER_TARGETS")
 
+        resolved_mark_price = mark_price
+        if resolved_mark_price is None:
+            resolved_mark_price = self._route_prices.get(target_key)
+
         if market == Market.PERPETUAL_FUTURES:
             route_wallet = self.wallet.get(exchange, market)
             if not isinstance(route_wallet, FuturesWallet):
                 raise TypeError("Futures order route must reference a FuturesWallet")
-            fill_price = self._decimal(decision.price or mark_price, "fill price")
+            if decision.price is None and resolved_mark_price is None:
+                raise ValueError(f"missing replay price for order target {target_key}")
+            fill_price = self._decimal(decision.price or resolved_mark_price, "fill price")
             route_wallet.fill_order(decision, float(fill_price))
             return True
         if market != Market.SPOT:
@@ -460,6 +473,12 @@ class ReplayEngine:
         immutable_facts = deepcopy(self.risk_facts.get(metadata.route_key) or {})
         if not immutable_facts:
             raise SpotFilterViolation("SPOT_RISK_FACTS_UNAVAILABLE")
+        if resolved_mark_price is None:
+            resolved_mark_price = immutable_facts.get("reference_price_decimal")
+        if resolved_mark_price is None:
+            raise SpotFilterViolation("SPOT_REFERENCE_PRICE_UNAVAILABLE")
+        if immutable_facts.get("reference_price_source") == "replay_event_close":
+            immutable_facts["reference_price_decimal"] = str(resolved_mark_price)
         immutable_facts["metadata"] = metadata.filter_facts()
         code = evaluate(
             decision,
@@ -470,7 +489,7 @@ class ReplayEngine:
         if code:
             raise SpotFilterViolation(code)
 
-        fill_price = self._decimal(decision.price or mark_price, "fill price")
+        fill_price = self._decimal(decision.price or resolved_mark_price, "fill price")
         if order_type == "MARKET":
             slippage = self.slippage_bps / Decimal("10000")
             if str(decision.side).strip().upper() == "BUY":
@@ -567,6 +586,6 @@ def run_replay(config: ReplayConfig) -> ReplayResult:
         if isinstance(decision, OrderDecision):
             if not engine.order_target_keys:
                 raise ValueError("ORDER_TARGETS is empty; strategy cannot return OrderDecision")
-            engine.execute_order(decision, mark_price=tick.price)
+            engine.execute_order(decision)
             orders += 1
     return ReplayResult(bars_processed=bars, orders_filled=orders)

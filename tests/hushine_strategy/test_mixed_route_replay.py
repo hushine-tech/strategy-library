@@ -314,6 +314,80 @@ def test_multi_symbol_spot_prices_and_mixed_market_orders_remain_isolated():
     assert wallet.get("binance", "perpetual_futures").position_qty("BTCUSDT") == 0.02
 
 
+def test_cross_symbol_order_uses_the_target_routes_latest_price():
+    wallet = PortfolioWallet.spot(
+        SpotWallet.from_assets({"BTC": ("0", "0"), "ETH": ("0", "0"), "USDT": ("1000", "0")}),
+        venue_id=10,
+    )
+    lot_size = ({
+        "filter_type": "LOT_SIZE",
+        "min_qty": "0.00001",
+        "max_qty": "9000",
+        "step_size": "0.00001",
+    },)
+    btc = replace(_spot_metadata(), filters=lot_size)
+    eth = SpotSymbolMetadata(
+        venue_id=10,
+        exchange="binance",
+        market="spot",
+        symbol="ETHUSDT",
+        status="TRADING",
+        base_asset="ETH",
+        quote_asset="USDT",
+        base_asset_precision=8,
+        quote_asset_precision=8,
+        spot_trading_allowed=True,
+        order_types=("MARKET",),
+        filters=lot_size,
+    )
+    engine = ReplayEngine(
+        wallet=wallet,
+        metadata={btc.route_key: btc, eth.route_key: eth},
+        declared_inputs=[
+            StrategyInput("binance", "spot", "BTCUSDT", "1m"),
+            StrategyInput("binance", "spot", "ETHUSDT", "1m"),
+        ],
+        order_targets=[StrategyOrderTarget("binance", "spot", "ETHUSDT")],
+        risk_facts={eth.route_key: {
+            "reference_price_source": "replay_event_close",
+            "reference_price_decimal": "1",
+        }},
+    )
+    assert engine.push_market_data(MarketData(
+        stream_id="eth",
+        exchange="binance",
+        market="spot",
+        kind="kline",
+        symbol="ETHUSDT",
+        interval="1m",
+        price=3_000,
+        timestamp=1,
+    )) is True
+    assert engine.push_market_data(MarketData(
+        stream_id="btc",
+        exchange="binance",
+        market="spot",
+        kind="kline",
+        symbol="BTCUSDT",
+        interval="1m",
+        price=50_000,
+        timestamp=2,
+    )) is True
+
+    assert engine.execute_order(OrderDecision(
+        exchange="binance",
+        market="spot",
+        symbol="ETHUSDT",
+        side="BUY",
+        qty="0.1",
+        order_type="MARKET",
+    )) is True
+
+    spot = wallet.get("binance", "spot", venue_id=10)
+    assert spot.assets["ETH"].free == Decimal("0.1")
+    assert spot.assets["USDT"].free == Decimal("699.880000000000")
+
+
 def test_replay_engine_copies_metadata_and_risk_facts_before_execution():
     wallet = _mixed_wallet()
     lot_size = {
