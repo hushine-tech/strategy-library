@@ -46,8 +46,10 @@ IMPORT_PROBE_ENV_KEYS = frozenset(
 )
 PROBE_ARGV_LIMIT = 8 * 1024
 PROBE_PIPE_LIMIT = 64 * 1024
-PROFILE_PROBE_TIMEOUT_SECONDS = 30.0
-PROBE_MAX_TIMEOUT_SECONDS = 30.0
+PROFILE_PROBE_TIMEOUT_SECONDS = 120.0
+PROFILE_PROBE_MAX_TIMEOUT_SECONDS = 120.0
+IMPORT_PROBE_TIMEOUT_SECONDS = 90.0
+PROBE_MAX_TIMEOUT_SECONDS = 90.0
 PROBE_TERMINATE_GRACE_SECONDS = 1.0
 PROBE_PIPE_DRAIN_SECONDS = 0.1
 _SOURCE_DATE_EPOCH_MAX_DIGITS = 20
@@ -279,11 +281,11 @@ def valid_probe_argv(command: object) -> bool:
     return _validated_probe_argv_snapshot(command) is not None
 
 
-def _valid_timeout(value: object) -> bool:
+def _valid_timeout(value: object, maximum: float) -> bool:
     return (
         type(value) in {int, float}
         and math.isfinite(value)
-        and 0 < value <= PROBE_MAX_TIMEOUT_SECONDS
+        and 0 < value <= maximum
     )
 
 
@@ -748,9 +750,14 @@ def run_probe(
     source_environment: Mapping[str, str] | None = None,
     thread_prefix: str = "runtime-probe-",
 ) -> ProbeTransportResult:
-    if not _valid_timeout(timeout_seconds):
-        raise ValueError("invalid probe timeout")
     _environment_keys(environment_policy)
+    maximum_timeout = (
+        PROFILE_PROBE_MAX_TIMEOUT_SECONDS
+        if environment_policy == PROFILE_PROBE_POLICY
+        else PROBE_MAX_TIMEOUT_SECONDS
+    )
+    if not _valid_timeout(timeout_seconds, maximum_timeout):
+        raise ValueError("invalid probe timeout")
     command_snapshot = _validated_probe_argv_snapshot(command)
     if command_snapshot is None:
         raise ValueError("invalid target Python invocation")

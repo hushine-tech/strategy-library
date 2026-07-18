@@ -1415,7 +1415,7 @@ class TestTransportPolicies:
             -float("inf"),
             0,
             -1,
-            30.0001,
+            transport.PROBE_MAX_TIMEOUT_SECONDS + 0.1,
         ],
     )
     def test_timeout_is_rejected_before_directory_creation_or_launch(
@@ -1439,8 +1439,10 @@ class TestTransportPolicies:
                 timeout_seconds=timeout,
             )
 
-    @pytest.mark.parametrize("timeout", [1, 1.5, 30])
-    def test_finite_positive_timeout_through_thirty_is_accepted(
+    @pytest.mark.parametrize(
+        "timeout", [1, 1.5, transport.PROBE_MAX_TIMEOUT_SECONDS]
+    )
+    def test_finite_positive_timeout_through_import_hard_limit_is_accepted(
         self, monkeypatch, timeout
     ):
         real_run = transport.run_probe
@@ -1454,6 +1456,43 @@ class TestTransportPolicies:
 
         assert result.returncode == 0
         assert calls[0]["process"].poll() is not None
+
+    def test_profile_probe_has_a_separate_bounded_cold_start_budget(
+        self, monkeypatch
+    ):
+        calls = TestTransportLifecycle._install_helper_popen(monkeypatch, "pass\n")
+
+        assert transport.PROFILE_PROBE_TIMEOUT_SECONDS >= 90
+        result = transport.run_probe(
+            [PYTHON, "-I", "-c", "pass"],
+            environment_policy=transport.PROFILE_PROBE_POLICY,
+            timeout_seconds=transport.PROFILE_PROBE_TIMEOUT_SECONDS,
+        )
+
+        assert result.returncode == 0
+        assert calls[0]["process"].poll() is not None
+        with pytest.raises(ValueError, match="invalid probe timeout"):
+            transport.run_probe(
+                [PYTHON, "-I", "-c", "pass"],
+                environment_policy=transport.IMPORT_PROBE_POLICY,
+                timeout_seconds=transport.PROFILE_PROBE_TIMEOUT_SECONDS,
+            )
+
+    def test_profile_probe_rejects_timeout_above_its_hard_limit(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            transport,
+            "create_private_probe_root",
+            lambda *_args, **_kwargs: pytest.fail("private root was created"),
+        )
+
+        with pytest.raises(ValueError, match="invalid probe timeout"):
+            transport.run_probe(
+                [PYTHON, "-I", "-c", "pass"],
+                environment_policy=transport.PROFILE_PROBE_POLICY,
+                timeout_seconds=transport.PROFILE_PROBE_MAX_TIMEOUT_SECONDS + 0.1,
+            )
 
 
 class TestTransportLifecycle:
@@ -1988,8 +2027,15 @@ class TestRealImportChild:
         public_signature = inspect.signature(probe_import_records)
         private_signature = inspect.signature(protocol._probe_import_records_for_test)
         assert "extra_python_path" not in public_signature.parameters
-        assert public_signature.parameters["timeout_seconds"].default == 30.0
-        assert private_signature.parameters["timeout_seconds"].default == 30.0
+        assert transport.IMPORT_PROBE_TIMEOUT_SECONDS >= 90
+        assert (
+            public_signature.parameters["timeout_seconds"].default
+            == transport.IMPORT_PROBE_TIMEOUT_SECONDS
+        )
+        assert (
+            private_signature.parameters["timeout_seconds"].default
+            == transport.IMPORT_PROBE_TIMEOUT_SECONDS
+        )
         assert not hasattr(
             sys.modules["hushine_runtime_import_probe"],
             "_probe_import_records_for_test",
@@ -2287,7 +2333,15 @@ class TestRealImportChild:
 
     @pytest.mark.parametrize(
         "timeout",
-        [True, "1", float("nan"), float("inf"), 0, -1, 30.1],
+        [
+            True,
+            "1",
+            float("nan"),
+            float("inf"),
+            0,
+            -1,
+            transport.PROBE_MAX_TIMEOUT_SECONDS + 0.1,
+        ],
     )
     def test_public_client_rejects_invalid_timeout_before_private_root(
         self, monkeypatch, timeout

@@ -10,6 +10,7 @@ import sys
 from typing import Iterable, Literal, Mapping
 
 from hushine_runtime_import_probe.transport import (
+    IMPORT_PROBE_TIMEOUT_SECONDS,
     IMPORT_PROBE_POLICY,
     ProbeTransportError,
     run_probe,
@@ -650,7 +651,7 @@ def probe_import_records(
     *,
     python_invocation_path: str,
     expected_profile: ExpectedProfile,
-    timeout_seconds: float = 30.0,
+    timeout_seconds: float = IMPORT_PROBE_TIMEOUT_SECONDS,
 ) -> ImportProbeResult:
     return _probe_import_records(
         imports,
@@ -666,7 +667,7 @@ def _probe_import_records_for_test(
     *,
     python_invocation_path: str,
     expected_profile: ExpectedProfile,
-    timeout_seconds: float = 30.0,
+    timeout_seconds: float = IMPORT_PROBE_TIMEOUT_SECONDS,
     extra_python_path: tuple[str, ...] = (),
 ) -> ImportProbeResult:
     return _probe_import_records(
