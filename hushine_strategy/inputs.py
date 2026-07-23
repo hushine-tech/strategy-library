@@ -189,6 +189,46 @@ class InputView:
     def trigger(self) -> MarketData | None:
         return self._trigger
 
+    def _require_trigger(self) -> MarketData:
+        if self._trigger is None:
+            raise RuntimeError(
+                "InputView has no trigger; on_market_data should only be "
+                "invoked after update() set a declared tick."
+            )
+        return self._trigger
+
+    @property
+    def price(self) -> float:
+        return float(self._require_trigger().price)
+
+    @property
+    def symbol(self) -> str:
+        return self._require_trigger().symbol
+
+    @property
+    def interval(self) -> str:
+        return str(self._require_trigger().interval)
+
+    @property
+    def timestamp(self) -> Any:
+        return self._require_trigger().timestamp
+
+    @property
+    def klines(self) -> Any:
+        return self._require_trigger().klines
+
+    @property
+    def orderbook(self) -> Any:
+        return self._require_trigger().orderbook
+
+    @property
+    def oi(self) -> float | None:
+        return self._require_trigger().oi
+
+    @property
+    def funding_rate(self) -> float | None:
+        return self._require_trigger().funding_rate
+
     def get_stream(
         self,
         stream_id: str,

@@ -136,6 +136,34 @@ def test_input_view_returns_latest_tick_by_market_symbol_interval():
     assert view.exchange["binance"]["perpetual_futures"].symbol["BTCUSDT"].interval["1m"] == tick
 
 
+def test_input_view_preserves_hosted_trigger_compatibility_properties():
+    view = InputView([StrategyInput(exchange="binance", market="spot", symbol="BTCUSDT", interval="1m")])
+    tick = MarketData(
+        symbol="BTCUSDT",
+        price=100.5,
+        timestamp=123,
+        market="spot",
+        interval="1m",
+        klines={"close": 100.5},
+        orderbook={"bid": 100.4},
+        oi=42.0,
+        funding_rate=0.0001,
+    )
+
+    with pytest.raises(RuntimeError, match="no trigger"):
+        _ = view.price
+
+    assert view.update(tick) is True
+    assert view.price == 100.5
+    assert view.symbol == "BTCUSDT"
+    assert view.interval == "1m"
+    assert view.timestamp == 123
+    assert view.klines == {"close": 100.5}
+    assert view.orderbook == {"bid": 100.4}
+    assert view.oi == 42.0
+    assert view.funding_rate == 0.0001
+
+
 def test_market_data_defaults_to_perpetual_futures_and_keeps_platform_kline_compatibility_fields():
     default_tick = MarketData(symbol="BTCUSDT", price=100.0, timestamp=123)
     assert default_tick.market == Market.PERPETUAL_FUTURES
