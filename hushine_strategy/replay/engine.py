@@ -19,6 +19,7 @@ from hushine_strategy.inputs import (
     parse_declared_inputs,
     parse_order_targets,
 )
+from hushine_strategy.indicator_output import IndicatorWriter, parse_indicator_definitions
 from hushine_strategy.notifier import LocalNotifier
 from hushine_strategy.types import Exchange, Market, MarketData, OrderDecision
 from hushine_strategy.validator import ALLOWED_IMPORT_ROOTS, FORBIDDEN_IMPORT_ROOTS, validate_strategy_code
@@ -590,6 +591,9 @@ def run_replay(config: ReplayConfig) -> ReplayResult:
     setattr(strategy, "notify", config.notifier or LocalNotifier())
     inputs = parse_declared_inputs(getattr(strategy, "INPUTS", None))
     order_targets = parse_order_targets(getattr(strategy, "ORDER_TARGETS", None))
+    indicator_definitions = parse_indicator_definitions(getattr(strategy, "INDICATORS", None))
+    indicator_writer = IndicatorWriter(indicator_definitions)
+    setattr(strategy, "indicators", indicator_writer)
     _verify_immutable_replay_declarations(config, inputs, order_targets)
     if isinstance(config.wallet, PortfolioWallet):
         portfolio_wallet = config.wallet
@@ -626,7 +630,9 @@ def run_replay(config: ReplayConfig) -> ReplayResult:
             continue
         if not view.update(tick):
             raise RuntimeError("replay input dispatch disagreed with strategy InputView")
+        indicator_writer.reset_bar()
         decision = strategy.on_market_data(view, config.wallet)
+        indicator_writer.drain()
         bars += 1
         if isinstance(decision, OrderDecision):
             if not engine.order_target_keys:

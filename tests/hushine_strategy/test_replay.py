@@ -366,6 +366,25 @@ class MyStrategy:
 """
 
 
+INDICATOR_STRATEGY_CODE = """
+from hushine_strategy import Exchange, Market
+
+class MyStrategy:
+    INPUTS = [{"exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "symbol": "BTCUSDT", "interval": "1m"}]
+    ORDER_TARGETS = []
+    INDICATORS = {
+        "observed_price": {"type": "line", "pane": "price"},
+        "buy_signal": {"type": "marker", "pane": "price"},
+    }
+
+    def on_market_data(self, data, wallet):
+        price = float(data.price)
+        self.indicators.set("observed_price", price)
+        self.indicators.mark("buy_signal", text="BUY", price=price)
+        return None
+"""
+
+
 def _btcusdt_tick() -> MarketData:
     return MarketData(
         symbol="BTCUSDT",
@@ -401,6 +420,19 @@ def test_replay_processes_ticks_and_fills_local_order():
     assert result.bars_processed == 2
     assert result.orders_filled == 1
     assert wallet.position_qty("BTCUSDT") == 0.01
+
+
+def test_replay_injects_hosted_indicator_writer_for_each_bar():
+    wallet = FuturesWallet(initial_balance=1000.0)
+
+    result = run_replay(ReplayConfig(
+        strategy_code=INDICATOR_STRATEGY_CODE,
+        ticks=[_btcusdt_tick(), _btcusdt_tick()],
+        wallet=wallet,
+    ))
+
+    assert result.bars_processed == 2
+    assert result.orders_filled == 0
 
 
 def test_replay_requires_order_targets_declaration():
