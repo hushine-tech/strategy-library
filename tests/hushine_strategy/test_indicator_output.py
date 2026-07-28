@@ -51,6 +51,27 @@ def test_indicator_definition_rejects_invalid_type():
         parse_indicator_definitions({"alpha": {"type": "table", "pane": "strategy"}})
 
 
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ([], "config.config"),
+        ({"position": "top"}, "config.position"),
+        ({"shape": "triangle"}, "config.shape"),
+        ({"threshold": float("nan")}, "JSON-compatible"),
+        ({"threshold": object()}, "JSON-compatible"),
+    ],
+)
+def test_indicator_definition_rejects_invalid_transport_config(config, message):
+    with pytest.raises(ValueError, match=message):
+        parse_indicator_definitions({
+            "signal": {
+                "type": "marker",
+                "pane": "price",
+                "config": config,
+            },
+        })
+
+
 def test_indicator_writer_rejects_invalid_marker_position_and_shape():
     definitions = parse_indicator_definitions({
         "signal": {"type": "marker", "pane": "price"},
@@ -64,3 +85,31 @@ def test_indicator_writer_rejects_invalid_marker_position_and_shape():
     assert frame.warnings == [
         "marker position must be aboveBar, belowBar, or inBar: signal"
     ]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_indicator_writer_treats_non_finite_scalar_as_missing(value):
+    definitions = parse_indicator_definitions({
+        "alpha": {"type": "line", "pane": "strategy"},
+    })
+    writer = IndicatorWriter(definitions)
+
+    writer.set("alpha", value)
+
+    frame = writer.drain()
+    assert frame.values == {}
+    assert frame.warnings == ["indicator value must be finite: alpha"]
+
+
+@pytest.mark.parametrize("price", [float("nan"), float("inf"), float("-inf")])
+def test_indicator_writer_rejects_non_finite_marker_price(price):
+    definitions = parse_indicator_definitions({
+        "signal": {"type": "marker", "pane": "price"},
+    })
+    writer = IndicatorWriter(definitions)
+
+    writer.mark("signal", text="BUY", price=price)
+
+    frame = writer.drain()
+    assert frame.markers == {}
+    assert frame.warnings == ["marker price must be finite: signal"]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -55,9 +57,28 @@ def parse_indicator_definitions(raw: object) -> list[IndicatorDefinition]:
         if pane not in SUPPORTED_PANES and not pane.startswith("custom:"):
             raise ValueError(f"indicator {key} pane must be price, strategy, or custom:<name>")
 
-        config = raw_cfg.get("config") or {}
+        config = raw_cfg.get("config")
+        if config is None:
+            config = {}
         if not isinstance(config, dict):
             raise ValueError(f"indicator {key} config.config must be a dict")
+        if typ == "marker":
+            position = str(config.get("position") or "").strip()
+            if position and position not in SUPPORTED_MARKER_POSITIONS:
+                raise ValueError(
+                    f"indicator {key} config.position must be aboveBar, belowBar, or inBar"
+                )
+            shape = str(config.get("shape") or "").strip()
+            if shape and shape not in SUPPORTED_MARKER_SHAPES:
+                raise ValueError(
+                    f"indicator {key} config.shape must be arrowDown, arrowUp, circle, or square"
+                )
+        try:
+            json.dumps(config, allow_nan=False)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"indicator {key} config must be JSON-compatible"
+            ) from exc
         out.append(IndicatorDefinition(
             key=key,
             name=str(raw_cfg.get("name") or key).strip(),
@@ -94,9 +115,14 @@ class IndicatorWriter:
             self._frame.values[key] = None
             return
         try:
-            self._frame.values[key] = float(value)
-        except (TypeError, ValueError):
+            parsed = float(value)
+        except (OverflowError, TypeError, ValueError):
             self._frame.warnings.append(f"indicator value must be numeric or None: {key}")
+            return
+        if not math.isfinite(parsed):
+            self._frame.warnings.append(f"indicator value must be finite: {key}")
+            return
+        self._frame.values[key] = parsed
 
     def mark(
         self,
@@ -131,10 +157,14 @@ class IndicatorWriter:
         marker: dict[str, Any] = {"text": str(text or "")}
         if price is not None:
             try:
-                marker["price"] = float(price)
-            except (TypeError, ValueError):
+                parsed_price = float(price)
+            except (OverflowError, TypeError, ValueError):
                 self._frame.warnings.append(f"marker price must be numeric: {key}")
                 return
+            if not math.isfinite(parsed_price):
+                self._frame.warnings.append(f"marker price must be finite: {key}")
+                return
+            marker["price"] = parsed_price
         color = str(color or "").strip()
         if color:
             marker["color"] = color
