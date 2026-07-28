@@ -6,6 +6,8 @@ from typing import Any
 
 SUPPORTED_TYPES = {"line", "histogram", "marker"}
 SUPPORTED_PANES = {"price", "strategy"}
+SUPPORTED_MARKER_POSITIONS = {"aboveBar", "belowBar", "inBar"}
+SUPPORTED_MARKER_SHAPES = {"circle", "square", "arrowUp", "arrowDown"}
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,16 @@ class IndicatorWriter:
         except (TypeError, ValueError):
             self._frame.warnings.append(f"indicator value must be numeric or None: {key}")
 
-    def mark(self, key: str, text: str = "", price: float | None = None, color: str = "") -> None:
+    def mark(
+        self,
+        key: str,
+        text: str = "",
+        price: float | None = None,
+        color: str = "",
+        *,
+        position: str = "",
+        shape: str = "",
+    ) -> None:
         key = str(key or "").strip()
         definition = self._definitions.get(key)
         if definition is None:
@@ -104,6 +115,18 @@ class IndicatorWriter:
             return
         if definition.type != "marker":
             self._frame.warnings.append(f"non-marker indicator key ignored by mark(): {key}")
+            return
+        position = str(position or "").strip()
+        if position and position not in SUPPORTED_MARKER_POSITIONS:
+            self._frame.warnings.append(
+                f"marker position must be aboveBar, belowBar, or inBar: {key}"
+            )
+            return
+        shape = str(shape or "").strip()
+        if shape and shape not in SUPPORTED_MARKER_SHAPES:
+            self._frame.warnings.append(
+                f"marker shape must be arrowDown, arrowUp, circle, or square: {key}"
+            )
             return
         marker: dict[str, Any] = {"text": str(text or "")}
         if price is not None:
@@ -115,6 +138,10 @@ class IndicatorWriter:
         color = str(color or "").strip()
         if color:
             marker["color"] = color
+        if position:
+            marker["position"] = position
+        if shape:
+            marker["shape"] = shape
         self._frame.markers.setdefault(key, []).append(marker)
 
     def drain(self) -> IndicatorFrame:
