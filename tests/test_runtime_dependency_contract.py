@@ -540,12 +540,25 @@ def test_stale_lock_is_detected_by_invoking_uv_lock_check(tmp_path, monkeypatch)
 
     assert codes(violations) == ["STALE_LOCK"]
     assert calls[0][0] == [
-        "uv",
+        checker._uv_executable(),
         "lock",
         "--check",
         "--project",
         str(project.parent),
     ]
+
+
+def test_uv_executable_falls_back_to_home_local_bin(tmp_path):
+    uv = tmp_path / ".local" / "bin" / ("uv.exe" if os.name == "nt" else "uv")
+    uv.parent.mkdir(parents=True)
+    uv.write_text("", encoding="utf-8")
+    uv.chmod(0o700)
+
+    resolved = checker._uv_executable(
+        {"HOME": str(tmp_path), "PATH": str(tmp_path / "empty-path")}
+    )
+
+    assert resolved == str(uv.resolve())
 
 
 def test_installed_check_uses_one_target_process_and_sanitized_environment(

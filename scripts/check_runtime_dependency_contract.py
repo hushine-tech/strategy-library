@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tomllib
 
@@ -61,6 +62,34 @@ class BaselineCheckResult:
 
 class ContractConfigurationError(ValueError):
     """Raised when the checker cannot evaluate its configured inputs."""
+
+
+def _uv_executable(env: dict[str, str] | None = None) -> str:
+    values = os.environ if env is None else env
+    path_value = values.get("PATH") or os.defpath
+    configured = (values.get("UV_BIN") or values.get("UV") or "").strip()
+    if configured:
+        resolved = shutil.which(configured, path=path_value)
+        if resolved:
+            return str(Path(resolved).resolve())
+        candidate = Path(configured)
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+        raise OSError(f"configured uv executable was not found: {configured}")
+
+    resolved = shutil.which("uv", path=path_value)
+    if resolved:
+        return str(Path(resolved).resolve())
+    home = values.get("HOME", "").strip()
+    if home:
+        names = ("uv.exe", "uv") if os.name == "nt" else ("uv",)
+        for name in names:
+            candidate = Path(home) / ".local" / "bin" / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate.resolve())
+    raise OSError("uv executable was not found")
 
 
 @dataclass(frozen=True)
@@ -294,7 +323,7 @@ def _run_uv_lock_check(
     try:
         completed = subprocess.run(
             [
-                "uv",
+                _uv_executable(),
                 "lock",
                 "--check",
                 "--project",
