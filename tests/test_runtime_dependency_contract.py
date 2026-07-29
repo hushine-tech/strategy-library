@@ -561,6 +561,19 @@ def test_uv_executable_falls_back_to_home_local_bin(tmp_path):
     assert resolved == str(uv.resolve())
 
 
+def test_uv_executable_falls_back_to_userprofile_local_bin(tmp_path):
+    uv = tmp_path / ".local" / "bin" / ("uv.exe" if os.name == "nt" else "uv")
+    uv.parent.mkdir(parents=True)
+    uv.write_text("", encoding="utf-8")
+    uv.chmod(0o700)
+
+    resolved = checker._uv_executable(
+        {"USERPROFILE": str(tmp_path), "PATH": str(tmp_path / "empty-path")}
+    )
+
+    assert resolved == str(uv.resolve())
+
+
 def test_installed_check_uses_one_target_process_and_sanitized_environment(
     monkeypatch,
 ):

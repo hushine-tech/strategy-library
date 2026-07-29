@@ -82,7 +82,7 @@ def _uv_executable(env: dict[str, str] | None = None) -> str:
     resolved = shutil.which("uv", path=path_value)
     if resolved:
         return str(Path(resolved).resolve())
-    home = values.get("HOME", "").strip()
+    home = (values.get("HOME") or values.get("USERPROFILE") or "").strip()
     if home:
         names = ("uv.exe", "uv") if os.name == "nt" else ("uv",)
         for name in names:
