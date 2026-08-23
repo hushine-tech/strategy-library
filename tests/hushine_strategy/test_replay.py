@@ -2,6 +2,7 @@ import os
 import socket
 import types
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +46,25 @@ class MyStrategy:
             )
         return None
 """
+
+
+def _route_aware_leverage_strategy_source(
+    *,
+    strategy_leverage: int | None,
+    target_leverage: int | None,
+) -> str:
+    template = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "route_aware_leverage_strategy.py.template"
+    ).read_text(encoding="utf-8")
+    return template.replace(
+        "__STRATEGY_LEVERAGE_DECLARATION__",
+        "" if strategy_leverage is None else f"    LEVERAGE = {strategy_leverage}",
+    ).replace(
+        "__TARGET_LEVERAGE_DECLARATION__",
+        "" if target_leverage is None else f'            "leverage": {target_leverage},',
+    )
 
 
 UNDECLARED_TICK_STRATEGY_CODE = """
@@ -438,17 +458,17 @@ def test_replay_rejects_invalid_strategy_leverage_before_processing_ticks():
 
 
 @pytest.mark.parametrize(
-    ("strategy_declaration", "target_declaration", "expected_leverage", "expected_source"),
+    ("strategy_leverage", "target_leverage", "expected_leverage", "expected_source"),
     [
-        ("", "", 1, "platform_default"),
-        ("    LEVERAGE = 5\n", "", 5, "strategy_default"),
-        ("    LEVERAGE = 5\n", ', "leverage": 10', 10, "order_target"),
+        (None, None, 1, "platform_default"),
+        (5, None, 5, "strategy_default"),
+        (5, 10, 10, "order_target"),
     ],
 )
 def test_replay_strategy_sizes_from_resolved_wallet_metadata_without_network(
     monkeypatch,
-    strategy_declaration,
-    target_declaration,
+    strategy_leverage,
+    target_leverage,
     expected_leverage,
     expected_source,
 ):
@@ -459,32 +479,10 @@ def test_replay_strategy_sizes_from_resolved_wallet_metadata_without_network(
             AssertionError("offline replay must not access an exchange")
         ),
     )
-    strategy_code = f"""
-from hushine_strategy import Exchange, Market, OrderDecision, OrderSide, OrderType, PositionSide
-
-class MyStrategy:
-{strategy_declaration}    INPUTS = [{{"exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "symbol": "BTCUSDT", "interval": "1m"}}]
-    ORDER_TARGETS = [{{"exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "symbol": "BTCUSDT"{target_declaration}}}]
-
-    def __init__(self):
-        self.done = False
-
-    def on_market_data(self, data, wallet):
-        if self.done:
-            return None
-        self.done = True
-        metadata = wallet.futures.risk_metadata["BTCUSDT"]
-        qty = wallet.get_wallet_balance() * 0.01 * metadata.configured_leverage / 100
-        return OrderDecision(
-            exchange=Exchange.BINANCE,
-            market=Market.PERPETUAL_FUTURES,
-            symbol="BTCUSDT",
-            side=OrderSide.BUY,
-            qty=str(qty),
-            order_type=OrderType.MARKET,
-            position_side=PositionSide.BOTH,
-        )
-"""
+    strategy_code = _route_aware_leverage_strategy_source(
+        strategy_leverage=strategy_leverage,
+        target_leverage=target_leverage,
+    )
     wallet = FuturesWallet(initial_balance=1000)
 
     result = run_replay(
@@ -496,6 +494,8 @@ class MyStrategy:
     )
 
     assert result.orders_filled == 1
+    assert isinstance(result.wallet, PortfolioWallet)
+    assert result.wallet.get("binance", "perpetual_futures") is wallet
     assert wallet.position_qty("BTCUSDT") == pytest.approx(expected_leverage * 0.1)
     assert wallet.risk_metadata["BTCUSDT"].configured_leverage == expected_leverage
     assert wallet.risk_metadata["BTCUSDT"].leverage_source == expected_source

@@ -246,6 +246,7 @@ class ReplayConfig:
 class ReplayResult:
     bars_processed: int
     orders_filled: int
+    wallet: PortfolioWallet
 
 
 class ReplayEngine:
@@ -656,7 +657,7 @@ def run_replay(config: ReplayConfig) -> ReplayResult:
         if not view.update(tick):
             raise RuntimeError("replay input dispatch disagreed with strategy InputView")
         indicator_writer.reset_bar()
-        decision = strategy.on_market_data(view, config.wallet)
+        decision = strategy.on_market_data(view, portfolio_wallet)
         indicator_writer.drain()
         bars += 1
         if isinstance(decision, OrderDecision):
@@ -664,4 +665,8 @@ def run_replay(config: ReplayConfig) -> ReplayResult:
                 raise ValueError("ORDER_TARGETS is empty; strategy cannot return OrderDecision")
             engine.execute_order(decision)
             orders += 1
-    return ReplayResult(bars_processed=bars, orders_filled=orders)
+    return ReplayResult(
+        bars_processed=bars,
+        orders_filled=orders,
+        wallet=portfolio_wallet,
+    )

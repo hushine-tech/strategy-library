@@ -1,0 +1,46 @@
+from hushine_strategy import Exchange, Market, OrderDecision, OrderSide, OrderType, PositionSide
+
+
+class MyStrategy:
+__STRATEGY_LEVERAGE_DECLARATION__
+    INPUTS = [
+        {
+            "exchange": Exchange.BINANCE,
+            "market": Market.PERPETUAL_FUTURES,
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+        }
+    ]
+    ORDER_TARGETS = [
+        {
+            "exchange": Exchange.BINANCE,
+            "market": Market.PERPETUAL_FUTURES,
+            "symbol": "BTCUSDT",
+__TARGET_LEVERAGE_DECLARATION__
+        }
+    ]
+
+    def __init__(self):
+        self.done = False
+
+    def on_market_data(self, data, wallet):
+        if self.done:
+            return None
+        self.done = True
+        route_wallet = wallet.get("binance", "perpetual_futures")
+        metadata = route_wallet.futures.risk_metadata["BTCUSDT"]
+        qty = (
+            route_wallet.get_wallet_balance()
+            * 0.01
+            * metadata.configured_leverage
+            / 100
+        )
+        return OrderDecision(
+            exchange=Exchange.BINANCE,
+            market=Market.PERPETUAL_FUTURES,
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            qty=str(qty),
+            order_type=OrderType.MARKET,
+            position_side=PositionSide.BOTH,
+        )
