@@ -10,6 +10,7 @@ from hushine_strategy import (
     StrategyInput,
     parse_order_targets as parse_order_targets_from_root,
     parse_declared_inputs,
+    resolve_order_target_leverages,
 )
 from hushine_strategy.inputs import StrategyOrderTarget, parse_order_targets
 from hushine_strategy.types import OrderSide, OrderType, OrderUpdateEvent, PositionSide
@@ -35,6 +36,15 @@ def test_root_import_exports_strategy_api_constants_and_order_target_parser():
         {"exchange": Exchange.BINANCE, "market": Market.SPOT, "symbol": "btcusdt"},
     ])
     assert targets == [StrategyOrderTarget(exchange="binance", market="spot", symbol="BTCUSDT")]
+
+
+def test_root_import_exports_order_target_leverage_resolver():
+    targets = resolve_order_target_leverages([
+        StrategyOrderTarget("binance", "perpetual_futures", "BTCUSDT"),
+    ], None)
+
+    assert targets[0].effective_leverage == 1
+    assert targets[0].leverage_source == "platform_default"
 
 
 def test_order_decision_requires_explicit_route_fields():
@@ -292,6 +302,91 @@ def test_parse_order_targets_rejects_futures_alias():
 def test_parse_order_targets_rejects_invalid_item_type():
     with pytest.raises(ValueError, match="each ORDER_TARGETS item must be a dict with exchange, market, and symbol"):
         parse_order_targets(["BTCUSDT"])
+
+
+def test_resolve_order_target_leverages_uses_platform_default_for_each_futures_target():
+    targets = resolve_order_target_leverages(parse_order_targets([
+        {"exchange": "binance", "market": "perpetual_futures", "symbol": "BTCUSDT"},
+        {"exchange": "okx", "market": "delivery_futures", "symbol": "ETHUSDT"},
+    ]), None)
+
+    assert [(item.symbol, item.effective_leverage, item.leverage_source) for item in targets] == [
+        ("BTCUSDT", 1, "platform_default"),
+        ("ETHUSDT", 1, "platform_default"),
+    ]
+
+
+def test_resolve_order_target_leverages_uses_strategy_default_when_target_has_no_override():
+    targets = resolve_order_target_leverages(parse_order_targets([
+        {"exchange": "binance", "market": "perpetual_futures", "symbol": "BTCUSDT"},
+    ]), 5)
+
+    assert [(item.effective_leverage, item.leverage_source) for item in targets] == [
+        (5, "strategy_default"),
+    ]
+
+
+def test_resolve_order_target_leverages_prefers_target_override_without_flattening_routes():
+    targets = resolve_order_target_leverages(parse_order_targets([
+        {"exchange": "binance", "market": "perpetual_futures", "symbol": "BTCUSDT"},
+        {"exchange": "binance", "market": "perpetual_futures", "symbol": "ETHUSDT", "leverage": 10},
+        {"exchange": "okx", "market": "delivery_futures", "symbol": "ZECUSDT"},
+    ]), 5)
+
+    assert [
+        (item.exchange, item.market, item.symbol, item.effective_leverage, item.leverage_source)
+        for item in targets
+    ] == [
+        ("binance", "perpetual_futures", "BTCUSDT", 5, "strategy_default"),
+        ("binance", "perpetual_futures", "ETHUSDT", 10, "order_target"),
+        ("okx", "delivery_futures", "ZECUSDT", 5, "strategy_default"),
+    ]
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.0, "5", float("nan"), object()])
+def test_resolve_order_target_leverages_rejects_invalid_runtime_values(value):
+    target = StrategyOrderTarget("binance", "perpetual_futures", "BTCUSDT", leverage=value)
+
+    with pytest.raises(ValueError, match="leverage must be a positive integer"):
+        resolve_order_target_leverages([target], None)
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.0, "5", float("nan"), object()])
+def test_resolve_order_target_leverages_rejects_invalid_strategy_runtime_values(value):
+    target = StrategyOrderTarget("binance", "perpetual_futures", "BTCUSDT")
+
+    with pytest.raises(ValueError, match="LEVERAGE must be a positive integer"):
+        resolve_order_target_leverages([target], value)
+
+
+def test_resolve_order_target_leverages_rejects_spot_target_override():
+    targets = parse_order_targets([
+        {"exchange": "binance", "market": "spot", "symbol": "BTCUSDT", "leverage": 5},
+    ])
+
+    with pytest.raises(ValueError, match="Spot ORDER_TARGETS cannot declare leverage"):
+        resolve_order_target_leverages(targets, None)
+
+
+def test_resolve_order_target_leverages_rejects_strategy_default_for_spot_only_targets():
+    targets = parse_order_targets([
+        {"exchange": "binance", "market": "spot", "symbol": "BTCUSDT"},
+    ])
+
+    with pytest.raises(ValueError, match="LEVERAGE requires at least one Futures ORDER_TARGETS entry"):
+        resolve_order_target_leverages(targets, 5)
+
+
+def test_resolve_order_target_leverages_leaves_spot_free_in_mixed_routes():
+    targets = resolve_order_target_leverages(parse_order_targets([
+        {"exchange": "binance", "market": "spot", "symbol": "BTCUSDT"},
+        {"exchange": "binance", "market": "perpetual_futures", "symbol": "BTCUSDT"},
+    ]), 5)
+
+    assert [(item.market, item.effective_leverage, item.leverage_source) for item in targets] == [
+        ("spot", None, None),
+        ("perpetual_futures", 5, "strategy_default"),
+    ]
 
 
 def test_input_view_does_not_expose_market_shortcut():

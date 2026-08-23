@@ -422,6 +422,20 @@ def test_replay_processes_ticks_and_fills_local_order():
     assert wallet.position_qty("BTCUSDT") == 0.01
 
 
+def test_replay_rejects_invalid_strategy_leverage_before_processing_ticks():
+    strategy_code = STRATEGY_CODE.replace(
+        "class MyStrategy:",
+        "class MyStrategy:\n    LEVERAGE = 0",
+    )
+
+    with pytest.raises(ValueError, match="LEVERAGE must be a positive integer"):
+        run_replay(ReplayConfig(
+            strategy_code=strategy_code,
+            ticks=[_btcusdt_tick()],
+            wallet=FuturesWallet(initial_balance=1000.0),
+        ))
+
+
 def test_replay_injects_hosted_indicator_writer_for_each_bar():
     wallet = FuturesWallet(initial_balance=1000.0)
 

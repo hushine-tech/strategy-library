@@ -18,6 +18,7 @@ from hushine_strategy.inputs import (
     _normalize_market,
     parse_declared_inputs,
     parse_order_targets,
+    resolve_order_target_leverages,
 )
 from hushine_strategy.indicator_output import IndicatorWriter, parse_indicator_definitions
 from hushine_strategy.notifier import LocalNotifier
@@ -257,6 +258,7 @@ class ReplayEngine:
         metadata: Mapping[tuple[int, str, str, str], SpotSymbolMetadata] | None = None,
         declared_inputs: Iterable[StrategyInput] = (),
         order_targets: Iterable[StrategyOrderTarget] = (),
+        strategy_leverage: Any = None,
         risk_facts: Mapping[tuple[int, str, str, str], Mapping[str, Any]] | None = None,
         default_fee_rate: Any = "0.0004",
         slippage_bps: Any = "0",
@@ -265,13 +267,24 @@ class ReplayEngine:
             raise TypeError("ReplayEngine requires a PortfolioWallet")
         self.wallet = wallet
         self.declared_inputs = tuple(declared_inputs)
+        self.order_targets = tuple(
+            resolve_order_target_leverages(order_targets, strategy_leverage)
+        )
+        self.futures_risk_metadata = {
+            item.key: {
+                "effective_leverage": item.effective_leverage,
+                "leverage_source": item.leverage_source,
+            }
+            for item in self.order_targets
+            if item.effective_leverage is not None
+        }
         self.order_target_keys = {
             (
                 _normalize_exchange(item.exchange),
                 _normalize_market(item.market),
                 str(item.symbol).strip().upper(),
             )
-            for item in order_targets
+            for item in self.order_targets
         }
         self.metadata: dict[tuple[int, str, str, str], SpotSymbolMetadata] = {}
         for raw_key, item in (metadata or {}).items():
@@ -618,6 +631,7 @@ def run_replay(config: ReplayConfig) -> ReplayResult:
         metadata=config.metadata,
         declared_inputs=inputs,
         order_targets=order_targets,
+        strategy_leverage=getattr(strategy, "LEVERAGE", None),
         risk_facts=config.risk_facts,
         default_fee_rate=config.default_fee_rate,
         slippage_bps=config.slippage_bps,

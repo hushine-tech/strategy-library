@@ -4,6 +4,7 @@ from hushine_strategy.inputs import (
     StrategyOrderTarget,
     parse_declared_inputs,
     parse_order_targets,
+    resolve_order_target_leverages,
 )
 from hushine_strategy.notifier import LocalNotifier
 from hushine_strategy.types import (
@@ -91,6 +92,7 @@ __all__ = [
     "iter_imported_modules",
     "parse_declared_inputs",
     "parse_order_targets",
+    "resolve_order_target_leverages",
     "load_runtime_dependency_profile",
     "probe_runtime_dependency_profile",
     "require_runtime_dependency_profile",

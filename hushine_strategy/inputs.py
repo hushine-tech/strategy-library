@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Iterable
+from dataclasses import dataclass, replace
+from typing import Any, Iterable, Literal
 
 from hushine_strategy.types import Exchange, Market, MarketData
 
@@ -42,6 +42,9 @@ class StrategyOrderTarget:
     exchange: str
     market: str
     symbol: str
+    leverage: int | None = None
+    effective_leverage: int | None = None
+    leverage_source: Literal["order_target", "strategy_default", "platform_default"] | None = None
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -320,10 +323,12 @@ def parse_order_targets(raw: Any) -> list[StrategyOrderTarget]:
     for item in list(raw):
         if isinstance(item, StrategyOrderTarget):
             exchange, market, symbol = item.exchange, item.market, item.symbol
+            leverage = item.leverage
         elif isinstance(item, dict):
             exchange = item.get("exchange")
             market = item.get("market")
             symbol = item.get("symbol")
+            leverage = item.get("leverage")
         else:
             raise ValueError("each ORDER_TARGETS item must be a dict with exchange, market, and symbol")
         if exchange is None or market is None or symbol is None:
@@ -338,9 +343,77 @@ def parse_order_targets(raw: Any) -> list[StrategyOrderTarget]:
                 exchange=_normalize_exchange(exchange),
                 market=_normalize_market(market),
                 symbol=symbol.upper(),
+                leverage=leverage,
             )
         )
     return out
+
+
+def _positive_leverage(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return value
+
+
+def resolve_order_target_leverages(
+    order_targets: Iterable[StrategyOrderTarget],
+    strategy_leverage: Any,
+) -> list[StrategyOrderTarget]:
+    """Resolve Futures leverage once while preserving each declared route."""
+    strategy_default = (
+        None
+        if strategy_leverage is None
+        else _positive_leverage(strategy_leverage, "LEVERAGE")
+    )
+    normalized: list[StrategyOrderTarget] = []
+    has_futures_target = False
+    futures_markets = {Market.PERPETUAL_FUTURES, Market.DELIVERY_FUTURES}
+
+    for item in order_targets:
+        exchange = _normalize_exchange(item.exchange)
+        market = _normalize_market(item.market)
+        symbol = str(item.symbol).strip().upper()
+        declared_leverage = item.leverage
+        if declared_leverage is not None:
+            declared_leverage = _positive_leverage(declared_leverage, "leverage")
+        if market == Market.SPOT:
+            if declared_leverage is not None:
+                raise ValueError("Spot ORDER_TARGETS cannot declare leverage")
+            normalized.append(replace(
+                item,
+                exchange=exchange,
+                market=market,
+                symbol=symbol,
+                leverage=None,
+                effective_leverage=None,
+                leverage_source=None,
+            ))
+            continue
+        if market not in futures_markets:
+            raise ValueError(f"leverage is unsupported for market: {market}")
+        has_futures_target = True
+        if declared_leverage is not None:
+            effective_leverage = declared_leverage
+            source: Literal["order_target", "strategy_default", "platform_default"] = "order_target"
+        elif strategy_default is not None:
+            effective_leverage = strategy_default
+            source = "strategy_default"
+        else:
+            effective_leverage = 1
+            source = "platform_default"
+        normalized.append(replace(
+            item,
+            exchange=exchange,
+            market=market,
+            symbol=symbol,
+            leverage=declared_leverage,
+            effective_leverage=effective_leverage,
+            leverage_source=source,
+        ))
+
+    if strategy_default is not None and not has_futures_target:
+        raise ValueError("LEVERAGE requires at least one Futures ORDER_TARGETS entry")
+    return normalized
 
 
 def parse_risk_controls(raw: Any) -> StrategyRiskControls:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+import socket
 
 import pytest
 
@@ -82,6 +83,49 @@ def test_same_symbol_spot_and_futures_prices_are_isolated_by_full_stream_identit
     assert engine.last_price(engine.stream_identity(futures_tick)) == Decimal("50100")
     assert wallet.get("binance", "spot").symbol_prices[metadata.route_key] == Decimal("50000")
     assert wallet.get("binance", "perpetual_futures").mark_price("BTCUSDT") == 50_100
+
+
+def test_replay_engine_keeps_resolved_futures_target_facts_per_symbol_and_spot_free(monkeypatch):
+    def fail_network(*_args, **_kwargs):
+        raise AssertionError("replay leverage resolution must not access the network")
+
+    monkeypatch.setattr(socket, "create_connection", fail_network)
+    metadata = _spot_metadata()
+    engine = ReplayEngine(
+        wallet=_mixed_wallet(),
+        metadata={metadata.route_key: metadata},
+        order_targets=[
+            StrategyOrderTarget("binance", "spot", "BTCUSDT"),
+            StrategyOrderTarget("binance", "perpetual_futures", "BTCUSDT"),
+            StrategyOrderTarget("binance", "perpetual_futures", "ETHUSDT", leverage=10),
+            StrategyOrderTarget("binance", "perpetual_futures", "ZECUSDT"),
+        ],
+        strategy_leverage=5,
+    )
+
+    assert [
+        (item.market, item.symbol, item.effective_leverage, item.leverage_source)
+        for item in engine.order_targets
+    ] == [
+        ("spot", "BTCUSDT", None, None),
+        ("perpetual_futures", "BTCUSDT", 5, "strategy_default"),
+        ("perpetual_futures", "ETHUSDT", 10, "order_target"),
+        ("perpetual_futures", "ZECUSDT", 5, "strategy_default"),
+    ]
+    assert engine.futures_risk_metadata == {
+        ("binance", "perpetual_futures", "BTCUSDT"): {
+            "effective_leverage": 5,
+            "leverage_source": "strategy_default",
+        },
+        ("binance", "perpetual_futures", "ETHUSDT"): {
+            "effective_leverage": 10,
+            "leverage_source": "order_target",
+        },
+        ("binance", "perpetual_futures", "ZECUSDT"): {
+            "effective_leverage": 5,
+            "leverage_source": "strategy_default",
+        },
+    }
 
 
 def test_stream_id_and_kind_prevent_same_route_data_from_collapsing():
