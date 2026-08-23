@@ -26,6 +26,14 @@ class FuturesWallet:
         self._mark_prices: dict[str, float] = {}
         self._positions: dict[str, _Position] = {}
 
+    @property
+    def futures(self) -> FuturesWallet:
+        """Expose the route wallet through the hosted strategy wallet shape."""
+        return self
+
+    def get_wallet_balance(self) -> float:
+        return float(self.wallet_balance)
+
     def install_target_leverage(
         self,
         symbol: str,

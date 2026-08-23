@@ -473,8 +473,8 @@ class MyStrategy:
         if self.done:
             return None
         self.done = True
-        metadata = wallet.risk_metadata["BTCUSDT"]
-        qty = wallet.wallet_balance * 0.01 * metadata.configured_leverage / 100
+        metadata = wallet.futures.risk_metadata["BTCUSDT"]
+        qty = wallet.get_wallet_balance() * 0.01 * metadata.configured_leverage / 100
         return OrderDecision(
             exchange=Exchange.BINANCE,
             market=Market.PERPETUAL_FUTURES,
