@@ -1,4 +1,5 @@
 import os
+import socket
 import types
 from decimal import Decimal
 
@@ -434,6 +435,70 @@ def test_replay_rejects_invalid_strategy_leverage_before_processing_ticks():
             ticks=[_btcusdt_tick()],
             wallet=FuturesWallet(initial_balance=1000.0),
         ))
+
+
+@pytest.mark.parametrize(
+    ("strategy_declaration", "target_declaration", "expected_leverage", "expected_source"),
+    [
+        ("", "", 1, "platform_default"),
+        ("    LEVERAGE = 5\n", "", 5, "strategy_default"),
+        ("    LEVERAGE = 5\n", ', "leverage": 10', 10, "order_target"),
+    ],
+)
+def test_replay_strategy_sizes_from_resolved_wallet_metadata_without_network(
+    monkeypatch,
+    strategy_declaration,
+    target_declaration,
+    expected_leverage,
+    expected_source,
+):
+    monkeypatch.setattr(
+        socket,
+        "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("offline replay must not access an exchange")
+        ),
+    )
+    strategy_code = f"""
+from hushine_strategy import Exchange, Market, OrderDecision, OrderSide, OrderType, PositionSide
+
+class MyStrategy:
+{strategy_declaration}    INPUTS = [{{"exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "symbol": "BTCUSDT", "interval": "1m"}}]
+    ORDER_TARGETS = [{{"exchange": Exchange.BINANCE, "market": Market.PERPETUAL_FUTURES, "symbol": "BTCUSDT"{target_declaration}}}]
+
+    def __init__(self):
+        self.done = False
+
+    def on_market_data(self, data, wallet):
+        if self.done:
+            return None
+        self.done = True
+        metadata = wallet.risk_metadata["BTCUSDT"]
+        qty = wallet.wallet_balance * 0.01 * metadata.configured_leverage / 100
+        return OrderDecision(
+            exchange=Exchange.BINANCE,
+            market=Market.PERPETUAL_FUTURES,
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            qty=str(qty),
+            order_type=OrderType.MARKET,
+            position_side=PositionSide.BOTH,
+        )
+"""
+    wallet = FuturesWallet(initial_balance=1000)
+
+    result = run_replay(
+        ReplayConfig(
+            strategy_code=strategy_code,
+            ticks=[_btcusdt_tick()],
+            wallet=wallet,
+        )
+    )
+
+    assert result.orders_filled == 1
+    assert wallet.position_qty("BTCUSDT") == pytest.approx(expected_leverage * 0.1)
+    assert wallet.risk_metadata["BTCUSDT"].configured_leverage == expected_leverage
+    assert wallet.risk_metadata["BTCUSDT"].leverage_source == expected_source
 
 
 def test_replay_injects_hosted_indicator_writer_for_each_bar():

@@ -126,6 +126,17 @@ def test_replay_engine_keeps_resolved_futures_target_facts_per_symbol_and_spot_f
             "leverage_source": "strategy_default",
         },
     }
+    futures_wallet = engine.wallet.get("binance", "perpetual_futures")
+    assert {
+        symbol: (metadata.configured_leverage, metadata.leverage_source)
+        for symbol, metadata in futures_wallet.risk_metadata.items()
+    } == {
+        "BTCUSDT": (5, "strategy_default"),
+        "ETHUSDT": (10, "order_target"),
+        "ZECUSDT": (5, "strategy_default"),
+    }
+    spot_wallet = engine.wallet.get("binance", "spot")
+    assert not hasattr(spot_wallet, "risk_metadata")
 
 
 def test_stream_id_and_kind_prevent_same_route_data_from_collapsing():

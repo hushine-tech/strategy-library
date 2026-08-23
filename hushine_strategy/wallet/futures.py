@@ -11,13 +11,32 @@ class _Position:
     entry_price: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class FuturesRiskMetadata:
+    configured_leverage: int
+    leverage_source: str
+
+
 class FuturesWallet:
     def __init__(self, initial_balance: float = 1000.0) -> None:
         self.initial_balance = float(initial_balance)
         self.wallet_balance = float(initial_balance)
         self.available_balance = float(initial_balance)
+        self.risk_metadata: dict[str, FuturesRiskMetadata] = {}
         self._mark_prices: dict[str, float] = {}
         self._positions: dict[str, _Position] = {}
+
+    def install_target_leverage(
+        self,
+        symbol: str,
+        *,
+        configured_leverage: int,
+        leverage_source: str,
+    ) -> None:
+        self.risk_metadata[str(symbol).strip().upper()] = FuturesRiskMetadata(
+            configured_leverage=int(configured_leverage),
+            leverage_source=str(leverage_source),
+        )
 
     def update_mark_price(self, symbol: str, price: float) -> None:
         self._mark_prices[str(symbol).upper()] = float(price)

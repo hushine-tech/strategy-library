@@ -278,6 +278,17 @@ class ReplayEngine:
             for item in self.order_targets
             if item.effective_leverage is not None
         }
+        for item in self.order_targets:
+            if item.effective_leverage is None:
+                continue
+            route_wallet = self.wallet.get(item.exchange, item.market)
+            if not isinstance(route_wallet, FuturesWallet):
+                raise TypeError("Futures target route must reference a FuturesWallet")
+            route_wallet.install_target_leverage(
+                item.symbol,
+                configured_leverage=item.effective_leverage,
+                leverage_source=str(item.leverage_source),
+            )
         self.order_target_keys = {
             (
                 _normalize_exchange(item.exchange),
