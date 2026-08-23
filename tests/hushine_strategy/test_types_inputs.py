@@ -343,7 +343,7 @@ def test_resolve_order_target_leverages_prefers_target_override_without_flatteni
     ]
 
 
-@pytest.mark.parametrize("value", [True, False, 0, -1, 1.0, "5", float("nan"), object()])
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.0, "5", float("nan"), object(), 2**31])
 def test_resolve_order_target_leverages_rejects_invalid_runtime_values(value):
     target = StrategyOrderTarget("binance", "perpetual_futures", "BTCUSDT", leverage=value)
 
@@ -351,7 +351,7 @@ def test_resolve_order_target_leverages_rejects_invalid_runtime_values(value):
         resolve_order_target_leverages([target], None)
 
 
-@pytest.mark.parametrize("value", [True, False, 0, -1, 1.0, "5", float("nan"), object()])
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.0, "5", float("nan"), object(), 2**31])
 def test_resolve_order_target_leverages_rejects_invalid_strategy_runtime_values(value):
     target = StrategyOrderTarget("binance", "perpetual_futures", "BTCUSDT")
 

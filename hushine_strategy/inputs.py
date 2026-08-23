@@ -350,8 +350,15 @@ def parse_order_targets(raw: Any) -> list[StrategyOrderTarget]:
 
 
 def _positive_leverage(value: Any, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"{field_name} must be a positive integer")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value <= 0
+        or value > 2**31 - 1
+    ):
+        raise ValueError(
+            f"{field_name} must be a positive integer no greater than {2**31 - 1}"
+        )
     return value
 
 
