@@ -15,7 +15,6 @@ from .types import (
 )
 from .logger import (
     Logger,
-    init,
     init_log,
     init_log_with_kafka,
     close,
@@ -48,7 +47,6 @@ __all__ = [
     "KafkaSentLog",
     "KafkaRecvLog",
     "Logger",
-    "init",
     "init_log",
     "init_log_with_kafka",
     "close",

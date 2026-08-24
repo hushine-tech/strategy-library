@@ -234,5 +234,14 @@ class TestMessageTruncation(unittest.TestCase):
         self.assertLessEqual(len(result), MAX_MESSAGE_LEN)
 
 
+class TestCanonicalExports(unittest.TestCase):
+    def test_legacy_init_is_not_exported(self):
+        import utils.log as log_package
+        import utils.log.logger as logger_module
+
+        self.assertFalse(hasattr(log_package, "init"))
+        self.assertFalse(hasattr(logger_module, "init"))
+
+
 if __name__ == "__main__":
     unittest.main()

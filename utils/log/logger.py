@@ -426,14 +426,6 @@ def init_log_with_kafka(
     return _default_logger
 
 
-def init(output_dir: str, *types: Type) -> Logger:
-    """Legacy init function - use init_log() instead."""
-    global _default_logger
-    with _logger_lock:
-        _default_logger = Logger(output_dir, list(types) if types else list(Type))
-    return _default_logger
-
-
 def close() -> None:
     global _default_logger
     with _logger_lock:
