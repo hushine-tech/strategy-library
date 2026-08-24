@@ -106,7 +106,7 @@ class _IntervalAccessor:
         self._symbol = symbol
 
     def __getitem__(self, interval: str) -> MarketData | None:
-        return self._view._legacy_route_value(
+        return self._view._route_value(
             (self._exchange, self._market, self._symbol, str(interval).strip())
         )
 
@@ -254,7 +254,7 @@ class InputView:
             raise KeyError(f"full market-data stream is not declared: {identity!r}")
         return self._values.get(identity)
 
-    def _legacy_route_value(self, route: tuple[str, str, str, str]) -> MarketData | None:
+    def _route_value(self, route: tuple[str, str, str, str]) -> MarketData | None:
         declared = {
             identity
             for identity in self._allowed

@@ -38,8 +38,8 @@ _SDK_PLATFORM_MODULES = frozenset(
     for module, _ in DEBUGGER_PLATFORM_IMPORT_POLICY.allowed_from_symbols
 )
 
-# Compatibility export used by replay's runtime import guard. Public third-party
-# roots are projected from the packaged dependency contract, never copied here.
+# Shared import policy used by replay's runtime guard. Public third-party roots
+# are projected from the packaged dependency contract, never copied here.
 ALLOWED_IMPORT_ROOTS: frozenset[str] = frozenset(
     _LIMITED_STDLIB_IMPORT_ROOTS
     | {"hushine_strategy"}
