@@ -67,6 +67,10 @@ class OrderUpdateFill:
     fee_missing: bool = False
     exchange_trade_id: str = ""
     exchange_order_id: str = ""
+    qty_decimal: str = ""
+    fill_price_decimal: str = ""
+    fee_decimal: str = ""
+    quote_qty_decimal: str = ""
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,11 @@ class OrderUpdateEvent:
     avg_price: float = 0.0
     event_source: str = ""
     symbol: str = ""
+    orig_qty_decimal: str = ""
+    executed_qty_decimal: str = ""
+    remaining_qty_decimal: str = ""
+    price_decimal: str = ""
+    cumulative_quote_qty_decimal: str = ""
 
 
 @dataclass(frozen=True)

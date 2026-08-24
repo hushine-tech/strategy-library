@@ -85,6 +85,37 @@ def test_same_symbol_spot_and_futures_prices_are_isolated_by_full_stream_identit
     assert wallet.get("binance", "perpetual_futures").mark_price("BTCUSDT") == 50_100
 
 
+def test_replay_canonicalizes_numeric_order_output_once() -> None:
+    wallet = _mixed_wallet()
+    metadata = replace(_spot_metadata(), filters=({
+        "filter_type": "LOT_SIZE",
+        "min_qty": "0.00000001",
+        "max_qty": "1000",
+        "step_size": "0.00000001",
+    },))
+    engine = ReplayEngine(
+        wallet=wallet,
+        metadata={metadata.route_key: metadata},
+        risk_facts={
+            metadata.route_key: {
+                "reference_price_decimal": "50000",
+            }
+        },
+        order_targets=[StrategyOrderTarget("binance", "spot", "BTCUSDT")],
+    )
+
+    assert engine.execute_order(OrderDecision(
+        exchange="binance",
+        market="spot",
+        symbol="BTCUSDT",
+        side="BUY",
+        qty=0.01,  # type: ignore[arg-type]
+        order_type="MARKET",
+    ), mark_price=50_000) is True
+
+    assert wallet.get("binance", "spot").assets["BTC"].total == Decimal("0.01")
+
+
 def test_replay_engine_keeps_resolved_futures_target_facts_per_symbol_and_spot_free(monkeypatch):
     def fail_network(*_args, **_kwargs):
         raise AssertionError("replay leverage resolution must not access the network")

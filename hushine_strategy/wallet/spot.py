@@ -53,13 +53,18 @@ def _decimal(value: Any, field_name: str) -> Decimal:
     return parsed
 
 
-def _exact(update: Any, exact_name: str, legacy_name: str = "") -> Decimal:
+def _exact(update: Any, exact_name: str) -> Decimal:
     raw = getattr(update, exact_name, "")
-    if raw not in (None, ""):
-        return _decimal(raw, exact_name)
-    if legacy_name:
-        return _decimal(getattr(update, legacy_name, 0) or 0, legacy_name)
-    return ZERO
+    if raw in (None, ""):
+        raise ValueError(f"{exact_name} is required")
+    return _decimal(raw, exact_name)
+
+
+def _optional_exact(update: Any, exact_name: str) -> Decimal:
+    raw = getattr(update, exact_name, "")
+    if raw in (None, ""):
+        return ZERO
+    return _decimal(raw, exact_name)
 
 
 def _filter_dict(item: Any) -> dict[str, Any]:
@@ -216,7 +221,6 @@ class SpotWallet:
             if asset in normalized:
                 raise ValueError(f"duplicate normalized Spot asset: {asset}")
             normalized[asset] = balance
-        normalized.setdefault("USDT", SpotAssetBalance())
         self.assets = normalized
 
     @classmethod
@@ -234,7 +238,6 @@ class SpotWallet:
             else:
                 free, locked = value
                 normalized[asset] = SpotAssetBalance(free=free, locked=locked)
-        normalized.setdefault("USDT", SpotAssetBalance())
         return cls(assets=normalized)
 
     def register_metadata(self, metadata: SpotSymbolMetadata) -> SpotSymbolMetadata:
@@ -415,25 +418,18 @@ class SpotWallet:
         order_key = (*route, order_identity)
         previous = self.order_states.get(order_key, _OrderState(ZERO, ZERO, ""))
 
-        fill_qty = _exact(update, "qty_decimal", "qty")
-        fill_price = _exact(update, "fill_price_decimal", "fill_price")
+        fill_qty = _exact(update, "qty_decimal")
+        fill_price = _exact(update, "fill_price_decimal")
         fill_quote = _exact(update, "quote_qty_decimal")
         if fill_qty and fill_quote == ZERO:
-            if fill_price == ZERO:
-                raise ValueError("Spot fill requires a price or quote quantity")
-            fill_quote = fill_qty * fill_price
-        fee = _exact(update, "fee_decimal", "fee")
+            raise ValueError("Spot fill requires exact quote quantity")
+        fee = _exact(update, "fee_decimal")
         fee_asset = _asset_code(getattr(update, "fee_asset", "") or facts.quote_asset)
 
-        cumulative_qty = _exact(update, "executed_qty_decimal", "executed_qty")
+        cumulative_qty = _exact(update, "executed_qty_decimal")
         if cumulative_qty == ZERO and fill_qty:
             cumulative_qty = previous.executed_qty + fill_qty
-        cumulative_quote_raw = getattr(update, "cumulative_quote_qty_decimal", "")
-        cumulative_quote = (
-            _decimal(cumulative_quote_raw, "cumulative_quote_qty_decimal")
-            if cumulative_quote_raw not in (None, "")
-            else previous.cumulative_quote_qty + fill_quote
-        )
+        cumulative_quote = _exact(update, "cumulative_quote_qty_decimal")
         if cumulative_qty < previous.executed_qty or cumulative_quote < previous.cumulative_quote_qty:
             return False
         if fill_qty == ZERO and (
@@ -470,13 +466,13 @@ class SpotWallet:
                     return False
                 fill_applied = True
 
-        orig_qty = _exact(update, "orig_qty_decimal", "orig_qty")
-        remaining_qty = _exact(update, "remaining_qty_decimal", "remaining_qty")
+        orig_qty = _exact(update, "orig_qty_decimal")
+        remaining_qty = _exact(update, "remaining_qty_decimal")
         if orig_qty == ZERO:
             orig_qty = cumulative_qty + remaining_qty
         if remaining_qty == ZERO and status in _ACTIVE_STATUSES and orig_qty > cumulative_qty:
             remaining_qty = orig_qty - cumulative_qty
-        price = _exact(update, "price_decimal", "price") or fill_price
+        price = _optional_exact(update, "price_decimal") or fill_price
         existing = self.open_orders.get(order_key)
         order = SpotOpenOrder(
             route_key=route,

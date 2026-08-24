@@ -253,6 +253,30 @@ def test_spot_wallet_rejects_duplicate_normalized_asset_codes():
         SpotWallet.from_assets({"btc": ("1", "0"), "BTC": ("2", "0")})
 
 
+def test_spot_wallet_does_not_invent_a_usdt_asset() -> None:
+    wallet = SpotWallet.from_assets({"BTC": ("1", "0")})
+
+    assert set(wallet.assets) == {"BTC"}
+
+
+def test_spot_order_update_rejects_missing_exact_fill_authority() -> None:
+    wallet = SpotWallet.from_assets({"USDT": ("1000", "0")})
+    metadata = wallet.register_metadata(_metadata())
+    update = _fill(
+        side="BUY",
+        trade_id="trade-1",
+        qty="0.01",
+        quote_qty="500",
+        fee="0.5",
+        fee_asset="USDT",
+    )
+    del update.qty_decimal
+    update.qty = 0.01
+
+    with pytest.raises(ValueError, match="qty_decimal is required"):
+        wallet.apply_order_update(update, metadata)
+
+
 def test_spot_metadata_copies_filter_facts_immutably():
     lot_size = {
         "filter_type": "LOT_SIZE",

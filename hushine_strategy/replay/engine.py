@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from itertools import count
 import sys
 import types
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from inspect import getmodule
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
@@ -37,6 +37,22 @@ from hushine_strategy.replay.spot_filters import evaluate
 _BLOCKED_SAFE_MODULE_NAMES = frozenset(
     {"__builtins__", "__dict__", "_logical_name", "_module"}
 )
+
+
+def _canonical_decimal_text(value: Any, field_name: str) -> str:
+    try:
+        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a finite non-negative decimal") from exc
+    if not parsed.is_finite() or parsed < 0:
+        raise ValueError(f"{field_name} must be a finite non-negative decimal")
+    if parsed == 0:
+        parsed = parsed.copy_abs()
+    integer_digits = 1 if parsed == 0 else max(parsed.adjusted() + 1, 1)
+    fractional_digits = max(-parsed.as_tuple().exponent, 0)
+    if integer_digits > 20 or fractional_digits > 18:
+        raise ValueError(f"{field_name} must fit NUMERIC(38,18)")
+    return format(parsed, "f")
 
 
 def _root(name: str) -> str:
@@ -471,6 +487,16 @@ class ReplayEngine:
         target_key = (exchange, market, symbol)
         if target_key not in self.order_target_keys:
             raise ValueError(f"order target {target_key} is not declared in ORDER_TARGETS")
+
+        decision = replace(
+            decision,
+            qty=_canonical_decimal_text(decision.qty, "qty"),
+            price=(
+                _canonical_decimal_text(decision.price, "price")
+                if decision.price is not None
+                else None
+            ),
+        )
 
         resolved_mark_price = mark_price
         if resolved_mark_price is None:
