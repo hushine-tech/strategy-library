@@ -92,9 +92,8 @@ class TestLiveDataSourceProcessMessage:
         assert kline.market == "futures"
 
     def test_process_matching_kline_with_subscription_delivers_callback(self):
-        subscription = LiveKlineSubscription.from_symbols_with_market(
-            [("BTCUSDT", "futures")],
-            interval="1m",
+        subscription = LiveKlineSubscription.from_declared_inputs(
+            [("futures", "BTCUSDT", "1m")],
             consumer_group="strategy-session-7-sess-123",
         )
         ds = LiveDataSource(config=KafkaConfig.for_live_kline_subscription(subscription))
@@ -121,9 +120,8 @@ class TestLiveDataSourceProcessMessage:
         cb.assert_called_once()
 
     def test_process_non_matching_kline_with_subscription_is_discarded(self):
-        subscription = LiveKlineSubscription.from_symbols_with_market(
-            [("BTCUSDT", "futures")],
-            interval="1m",
+        subscription = LiveKlineSubscription.from_declared_inputs(
+            [("futures", "BTCUSDT", "1m")],
             consumer_group="strategy-session-7-sess-123",
         )
         ds = LiveDataSource(config=KafkaConfig.for_live_kline_subscription(subscription))
@@ -305,9 +303,8 @@ class TestLiveDataSourceStartStop:
             types.SimpleNamespace(KafkaConsumerMiddleware=FakeConsumerMiddleware),
         )
 
-        subscription = LiveKlineSubscription.from_symbols_with_market(
-            [("BTCUSDT", "futures")],
-            interval="1m",
+        subscription = LiveKlineSubscription.from_declared_inputs(
+            [("futures", "BTCUSDT", "1m")],
             consumer_group="strategy-session-7-sess-123",
         )
         ds = LiveDataSource(config=KafkaConfig.for_live_kline_subscription(subscription))

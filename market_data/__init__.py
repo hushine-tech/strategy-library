@@ -16,9 +16,8 @@ Usage (Live):
     # In this workspace, strategy-service consumes market_data directly from
     # the local strategy-library checkout rather than a separately published
     # package release.
-    subscription = LiveKlineSubscription.from_symbols_with_market(
-        [("BTCUSDT", "futures")],
-        interval="1m",
+    subscription = LiveKlineSubscription.from_declared_inputs(
+        [("futures", "BTCUSDT", "1m")],
         consumer_group="strategy-session-7-sess-123",
     )
     ds = LiveDataSource(config=KafkaConfig.for_live_kline_subscription(subscription))

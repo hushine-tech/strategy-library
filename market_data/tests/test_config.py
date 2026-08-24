@@ -7,6 +7,15 @@ from market_data.config import (
 )
 
 
+def test_live_subscription_exposes_only_declared_input_shape():
+    import dataclasses
+
+    field_names = {field.name for field in dataclasses.fields(LiveKlineSubscription)}
+
+    assert field_names == {"exchange", "consumer_group", "allowed_inputs"}
+    assert not hasattr(LiveKlineSubscription, "from_symbols_with_market")
+
+
 def test_resolve_live_kline_topic_uses_canonical_family():
     topic = resolve_live_kline_topic("Binance", "Futures", "1m")
     assert topic == "md.kline.binance.futures.1m"
@@ -17,19 +26,22 @@ def test_parse_live_kline_topic_extracts_exchange_market_interval():
     assert parsed == ("binance", "spot", "5m")
 
 
-def test_live_kline_subscription_from_symbols_with_market_dedupes_markets():
-    subscription = LiveKlineSubscription.from_symbols_with_market(
-        [("BTCUSDT", "futures"), ("ETHUSDT", "spot"), ("SOLUSDT", "futures")],
-        interval="1m",
+def test_live_kline_subscription_normalizes_declared_inputs():
+    subscription = LiveKlineSubscription.from_declared_inputs(
+        [
+            ("futures", "BTCUSDT", "1m"),
+            ("spot", "ETHUSDT", "1m"),
+            ("futures", "SOLUSDT", "1m"),
+        ],
         consumer_group="strategy-session-7-sess-123",
     )
 
     assert subscription.consumer_group == "strategy-session-7-sess-123"
-    assert subscription.allowed_symbols_with_market == frozenset(
+    assert subscription.allowed_inputs == frozenset(
         {
-            ("BTCUSDT", "futures"),
-            ("ETHUSDT", "spot"),
-            ("SOLUSDT", "futures"),
+            ("BTCUSDT", "futures", "1m"),
+            ("ETHUSDT", "spot", "1m"),
+            ("SOLUSDT", "futures", "1m"),
         }
     )
     assert subscription.topics == [
@@ -39,9 +51,8 @@ def test_live_kline_subscription_from_symbols_with_market_dedupes_markets():
 
 
 def test_kafka_config_for_live_kline_subscription_uses_subscription_topics_and_group():
-    subscription = LiveKlineSubscription.from_symbols_with_market(
-        [("BTCUSDT", "futures")],
-        interval="1m",
+    subscription = LiveKlineSubscription.from_declared_inputs(
+        [("futures", "BTCUSDT", "1m")],
         consumer_group="strategy-session-9-sess-555",
     )
 

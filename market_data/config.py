@@ -73,29 +73,11 @@ def parse_live_kline_topic(topic: str | None) -> tuple[str, str, str] | None:
 
 @dataclass(frozen=True)
 class LiveKlineSubscription:
+    allowed_inputs: frozenset[tuple[str, str, str]]
     exchange: str = "binance"
-    markets: list[str] = field(default_factory=list)
-    interval: str = "1m"
     consumer_group: str = "market-data-consumer"
-    allowed_symbols_with_market: frozenset[tuple[str, str]] = field(default_factory=frozenset)
-    # Pre_C3 multi-interval support. When non-empty, this 3-tuple set is the
-    # authoritative filter: ``topics`` covers every ``(market, interval)`` pair
-    # present here, and ``matches()`` only accepts ticks whose
-    # ``(symbol, market, interval)`` key is in the set. Legacy
-    # ``interval`` / ``markets`` / ``allowed_symbols_with_market`` remain
-    # populated for backward compat but are ignored when ``allowed_inputs`` is
-    # populated.
-    allowed_inputs: frozenset[tuple[str, str, str]] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
-        normalized_allowed = frozenset(
-            (
-                _normalize_symbol(symbol),
-                _normalize_market(market),
-            )
-            for symbol, market in self.allowed_symbols_with_market
-        )
-
         normalized_inputs = frozenset(
             (
                 _normalize_symbol(sym),
@@ -104,52 +86,14 @@ class LiveKlineSubscription:
             )
             for sym, mk, iv in self.allowed_inputs
         )
-
-        seen_markets: set[str] = set()
-        normalized_markets: list[str] = []
-        source_markets: Iterable[str]
-        if self.markets:
-            source_markets = self.markets
-        elif normalized_inputs:
-            source_markets = [mk for _, mk, _ in normalized_inputs]
-        else:
-            source_markets = [market for _, market in normalized_allowed]
-
-        for market in source_markets:
-            normalized_market = _normalize_market(market)
-            if normalized_market in seen_markets:
-                continue
-            seen_markets.add(normalized_market)
-            normalized_markets.append(normalized_market)
+        if not normalized_inputs:
+            raise ValueError("live subscription requires at least one declared input")
 
         consumer_group = str(self.consumer_group).strip() or "market-data-consumer"
 
         object.__setattr__(self, "exchange", _normalize_exchange(self.exchange))
-        object.__setattr__(self, "markets", normalized_markets)
-        object.__setattr__(self, "interval", _normalize_interval(self.interval))
         object.__setattr__(self, "consumer_group", consumer_group)
-        object.__setattr__(self, "allowed_symbols_with_market", normalized_allowed)
         object.__setattr__(self, "allowed_inputs", normalized_inputs)
-
-    @classmethod
-    def from_symbols_with_market(
-        cls,
-        symbols_with_market: Iterable[tuple[str, str]],
-        *,
-        interval: str,
-        consumer_group: str,
-        exchange: str = "binance",
-    ) -> "LiveKlineSubscription":
-        normalized_pairs: list[tuple[str, str]] = []
-        for symbol, market in symbols_with_market:
-            normalized_pairs.append((_normalize_symbol(symbol), _normalize_market(market)))
-        return cls(
-            exchange=exchange,
-            interval=interval,
-            consumer_group=consumer_group,
-            allowed_symbols_with_market=frozenset(normalized_pairs),
-            markets=[market for _, market in normalized_pairs],
-        )
 
     @classmethod
     def from_declared_inputs(
@@ -192,42 +136,24 @@ class LiveKlineSubscription:
             raise ValueError(
                 "from_declared_inputs: at least one declared input is required"
             )
-        # Keep the legacy single-interval field pointing at the first seen
-        # interval so older consumers of .interval don't crash; the
-        # authoritative filter for matches/topics is allowed_inputs.
         sorted_triples = sorted(triples)
-        first_interval = sorted_triples[0][2]
-        markets_in_order: list[str] = []
-        for _, mk, _ in sorted_triples:
-            if mk not in markets_in_order:
-                markets_in_order.append(mk)
         return cls(
             exchange=exchange,
-            interval=first_interval,
             consumer_group=consumer_group,
-            markets=markets_in_order,
-            allowed_symbols_with_market=frozenset((s, m) for s, m, _ in sorted_triples),
             allowed_inputs=frozenset(sorted_triples),
         )
 
     @property
     def topics(self) -> list[str]:
-        if self.allowed_inputs:
-            # Distinct (market, interval) pairs — one Kafka topic per pair.
-            # Deterministic ordering keeps tests reproducible.
-            seen: set[tuple[str, str]] = set()
-            out: list[str] = []
-            for _, market, interval in sorted(self.allowed_inputs):
-                key = (market, interval)
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(resolve_live_kline_topic(self.exchange, market, interval))
-            return out
-        return [
-            resolve_live_kline_topic(self.exchange, market, self.interval)
-            for market in self.markets
-        ]
+        seen: set[tuple[str, str]] = set()
+        topics: list[str] = []
+        for _, market, interval in sorted(self.allowed_inputs):
+            key = (market, interval)
+            if key in seen:
+                continue
+            seen.add(key)
+            topics.append(resolve_live_kline_topic(self.exchange, market, interval))
+        return topics
 
     def matches(
         self,
@@ -239,49 +165,22 @@ class LiveKlineSubscription:
     ) -> bool:
         parsed_topic = parse_live_kline_topic(topic)
 
-        # Multi-interval path: allowed_inputs is authoritative.
-        if self.allowed_inputs:
-            if parsed_topic is not None:
-                topic_exchange, topic_market, topic_interval = parsed_topic
-                if topic_exchange != self.exchange:
-                    return False
-                resolved_market = topic_market
-                resolved_interval = topic_interval
-            else:
-                if market is None or interval is None:
-                    return False
-                resolved_market = _normalize_market(market)
-                resolved_interval = _normalize_interval(interval)
-            return (
-                _normalize_symbol(symbol),
-                resolved_market,
-                resolved_interval,
-            ) in self.allowed_inputs
-
-        # Legacy single-interval path.
-        resolved_market: str | None = None
         if parsed_topic is not None:
             topic_exchange, topic_market, topic_interval = parsed_topic
             if topic_exchange != self.exchange:
                 return False
-            if topic_interval != self.interval:
-                return False
-            if self.markets and topic_market not in self.markets:
-                return False
             resolved_market = topic_market
+            resolved_interval = topic_interval
         else:
-            if interval is not None and _normalize_interval(interval) != self.interval:
+            if market is None or interval is None:
                 return False
-            if market is not None:
-                resolved_market = _normalize_market(market)
-                if self.markets and resolved_market not in self.markets:
-                    return False
-
-        if self.allowed_symbols_with_market:
-            if resolved_market is None:
-                return False
-            return (_normalize_symbol(symbol), resolved_market) in self.allowed_symbols_with_market
-        return True
+            resolved_market = _normalize_market(market)
+            resolved_interval = _normalize_interval(interval)
+        return (
+            _normalize_symbol(symbol),
+            resolved_market,
+            resolved_interval,
+        ) in self.allowed_inputs
 
 
 @dataclass
