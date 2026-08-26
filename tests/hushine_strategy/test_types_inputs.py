@@ -13,7 +13,13 @@ from hushine_strategy import (
     resolve_order_target_leverages,
 )
 from hushine_strategy.inputs import StrategyOrderTarget, parse_order_targets
-from hushine_strategy.types import OrderSide, OrderType, OrderUpdateEvent, PositionSide
+from hushine_strategy.types import (
+    OrderSide,
+    OrderType,
+    OrderUpdateEvent,
+    OrderUpdateFill,
+    PositionSide,
+)
 
 
 def test_strategy_api_constants_are_public_string_values():
@@ -96,6 +102,22 @@ def test_order_update_event_keeps_legacy_positional_fields_stable():
     assert event.exchange_trade_id == "trade-1"
     assert event.event_source == ""
     assert event.symbol == ""
+
+
+def test_order_lifecycle_types_keep_canonical_event_and_trade_times():
+    fill = OrderUpdateFill(
+        symbol="BTCUSDT",
+        qty=1.0,
+        fill_price=100.0,
+        trade_time=101,
+    )
+    event = OrderUpdateEvent(
+        7, "session-1", 1, 10, "binance", "perpetual_futures", "BUY",
+        "BOTH", "fill", "FILLED", fill=fill, occurred_at=100,
+    )
+
+    assert event.occurred_at == 100
+    assert event.fill.trade_time == 101
 
 
 def test_parse_declared_inputs_normalizes_values():

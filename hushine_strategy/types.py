@@ -71,6 +71,7 @@ class OrderUpdateFill:
     fill_price_decimal: str = ""
     fee_decimal: str = ""
     quote_qty_decimal: str = ""
+    trade_time: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,7 @@ class OrderUpdateEvent:
     remaining_qty_decimal: str = ""
     price_decimal: str = ""
     cumulative_quote_qty_decimal: str = ""
+    occurred_at: Any | None = None
 
 
 @dataclass(frozen=True)
